@@ -48,6 +48,10 @@ SeatVault is an event/venue seat-reservation backend (concerts, movies, theaters
 
 Issues live in GitHub Issues (uses the `gh` CLI). See `docs/agents/issue-tracker.md`.
 
+### Milestone roadmap
+
+The M0-M7 implementation plan is tracked as GitHub issues labeled `milestone` (M0 = #5 ... M7 = #12), chained in order via native GitHub blocking dependencies. Run `gh issue list --label milestone --state all` to see current status before starting work on any milestone. Each issue holds that milestone's goal/deliverables/verification steps; the full original design detail (domain model, concurrency design, API surface, migration plan) lives in `CONTEXT.md` and `docs/adr/`.
+
 ### Domain docs
 
 Single-context layout — one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
