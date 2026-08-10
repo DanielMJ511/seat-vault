@@ -12,7 +12,8 @@ CREATE TABLE seats (
     row_label   VARCHAR(10) NOT NULL,
     seat_number INTEGER     NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT uq_seats_venue_position UNIQUE (venue_id, section, row_label, seat_number)
+    CONSTRAINT uq_seats_venue_position UNIQUE (venue_id, section, row_label, seat_number),
+    CONSTRAINT chk_seats_seat_number_positive CHECK (seat_number > 0)
 );
 
 CREATE INDEX idx_seats_venue ON seats (venue_id);

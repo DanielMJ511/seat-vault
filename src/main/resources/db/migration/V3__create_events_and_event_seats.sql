@@ -18,7 +18,7 @@ CREATE TABLE event_seats (
     seat_id         BIGINT        NOT NULL REFERENCES seats (id),
     status          VARCHAR(20)   NOT NULL DEFAULT 'AVAILABLE'
                         CHECK (status IN ('AVAILABLE', 'HELD', 'BOOKED')),
-    price           NUMERIC(10,2) NOT NULL,
+    price           NUMERIC(10,2) NOT NULL CHECK (price >= 0),
     current_hold_id BIGINT,
     created_at      TIMESTAMPTZ   NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ   NOT NULL DEFAULT now(),
@@ -26,3 +26,5 @@ CREATE TABLE event_seats (
 );
 
 CREATE INDEX idx_event_seats_status ON event_seats (status);
+-- Serves "available seats for event X" (browsing, hold-candidate selection).
+CREATE INDEX idx_event_seats_event_status ON event_seats (event_id, status);

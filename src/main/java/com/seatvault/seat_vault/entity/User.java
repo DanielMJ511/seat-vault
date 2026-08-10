@@ -8,6 +8,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
 import java.time.Instant;
+import java.util.Locale;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.EqualsAndHashCode;
@@ -31,7 +32,9 @@ public class User {
     @Column(name = "id")
     private Long id;
 
-    @Column(name = "email", nullable = false, unique = true)
+    // Uniqueness is case-insensitive, enforced via a functional index on
+    // lower(email) (see V1 migration) rather than a plain column constraint.
+    @Column(name = "email", nullable = false)
     private String email;
 
     @Column(name = "password_hash", nullable = false)
@@ -44,6 +47,9 @@ public class User {
     void onCreate() {
         if (createdAt == null) {
             createdAt = Instant.now();
+        }
+        if (email != null) {
+            email = email.toLowerCase(Locale.ROOT);
         }
     }
 }

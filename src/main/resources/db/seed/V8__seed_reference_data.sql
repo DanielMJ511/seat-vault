@@ -8,7 +8,7 @@ INSERT INTO venues (name, address) VALUES
     ('Riverside Theater', '456 River Rd, Springfield');
 
 INSERT INTO seats (venue_id, section, row_label, seat_number)
-SELECT v.id, sec.section, row_num::text, seat_num
+SELECT v.id, sec.section, chr(64 + row_num), seat_num
 FROM venues v
 CROSS JOIN (VALUES ('A'), ('B')) AS sec(section)
 CROSS JOIN generate_series(1, 3) AS row_num
