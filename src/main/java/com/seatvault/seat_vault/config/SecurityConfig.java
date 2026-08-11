@@ -24,15 +24,17 @@ import tools.jackson.databind.ObjectMapper;
 /**
  * Stateless JWT-based security configuration.
  * <p>
- * {@code /api/auth/register} and {@code /api/auth/login} plus any
- * {@code GET /api/**} request are public; everything else requires a valid
- * bearer token. M3 (browse APIs) doesn't exist yet, so per product decision
- * all GET endpoints under {@code /api} are public by default until that
- * milestone introduces endpoints that need finer-grained rules. {@code GET
- * /api/auth/me} is a deliberate carve-out from that blanket GET rule (and
- * from a blanket {@code /api/auth/**} rule) since it's the protected
- * current-user endpoint — its matcher is registered ahead of both permitAll
- * rules so it always requires authentication.
+ * The governing principle (see {@code docs/adr/0004-auth-boundary-is-response-identity-dependence-not-http-verb.md})
+ * is that a route is public if and only if its response doesn't depend on
+ * who's asking — not simply "GET is public." {@code /api/auth/register} and
+ * {@code /api/auth/login} plus any {@code GET /api/**} request are currently
+ * public; the blanket GET rule is a placeholder standing in for
+ * catalog/browse endpoints M3 hasn't introduced yet, not a claim that every
+ * future GET should be public. {@code GET /api/auth/me} is the first
+ * user-scoped exception: its matcher is registered ahead of both permitAll
+ * rules so it always requires authentication. Any future user-scoped GET
+ * (e.g. "my bookings") must get the same explicit carve-out, registered
+ * before the blanket GET rule — matcher order is first-match-wins.
  */
 @Configuration
 @EnableWebSecurity
