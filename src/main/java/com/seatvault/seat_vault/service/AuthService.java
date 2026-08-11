@@ -9,7 +9,9 @@ import com.seatvault.seat_vault.exception.ApiException;
 import com.seatvault.seat_vault.repository.UserRepository;
 import com.seatvault.seat_vault.security.AuthenticatedUser;
 import com.seatvault.seat_vault.security.JwtService;
+import java.util.Optional;
 import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
@@ -20,6 +22,20 @@ import org.springframework.transaction.annotation.Transactional;
 public class AuthService {
 
     private static final String INVALID_CREDENTIALS_MESSAGE = "Invalid email or password";
+
+    /**
+     * Precomputed valid BCrypt hash (cost factor 10, matching
+     * {@link org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder}'s
+     * default) of an arbitrary random string with no corresponding user
+     * account. {@link #login(LoginRequest)} matches against this whenever the
+     * requested email doesn't exist, so a BCrypt comparison always runs
+     * regardless of whether the account is real — keeping the "unknown
+     * email" and "wrong password" paths the same cost and closing a timing
+     * side-channel that would otherwise let an attacker enumerate registered
+     * emails.
+     */
+    private static final String DUMMY_HASH_FOR_TIMING_SAFETY =
+            "$2a$10$yoJRYsJKb1.r2.nXOt5T8OERS2IlGqGeB2MTdHN.EPqq8p4Xv5vlu";
 
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
@@ -36,19 +52,35 @@ public class AuthService {
                 .email(request.email())
                 .passwordHash(passwordEncoder.encode(request.password()))
                 .build();
-        User saved = userRepository.save(user);
+
+        User saved;
+        try {
+            saved = userRepository.save(user);
+        } catch (DataIntegrityViolationException ex) {
+            // Pre-check above isn't atomic with the insert, so a concurrent
+            // registration for the same email can still slip through and
+            // trip the uq_users_email_lower constraint here. Translate it to
+            // the same 409 the pre-check would have produced instead of
+            // letting it fall through to the generic 500 handler.
+            throw new ApiException(HttpStatus.CONFLICT, "EMAIL_ALREADY_REGISTERED",
+                    "An account with this email already exists.");
+        }
 
         return issueTokenFor(saved);
     }
 
     @Transactional(readOnly = true)
     public AuthResponse login(LoginRequest request) {
-        User user = userRepository.findByEmailIgnoreCase(request.email())
-                .filter(candidate -> passwordEncoder.matches(request.password(), candidate.getPasswordHash()))
-                .orElseThrow(() -> new ApiException(HttpStatus.UNAUTHORIZED, "INVALID_CREDENTIALS",
-                        INVALID_CREDENTIALS_MESSAGE));
+        Optional<User> found = userRepository.findByEmailIgnoreCase(request.email());
+        boolean matches = passwordEncoder.matches(
+                request.password(),
+                found.map(User::getPasswordHash).orElse(DUMMY_HASH_FOR_TIMING_SAFETY));
 
-        return issueTokenFor(user);
+        if (found.isEmpty() || !matches) {
+            throw new ApiException(HttpStatus.UNAUTHORIZED, "INVALID_CREDENTIALS", INVALID_CREDENTIALS_MESSAGE);
+        }
+
+        return issueTokenFor(found.get());
     }
 
     @Transactional(readOnly = true)

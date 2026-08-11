@@ -17,6 +17,7 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.AccessDeniedHandler;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import tools.jackson.databind.ObjectMapper;
 
@@ -54,7 +55,9 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.GET, "/api/**").permitAll()
                         .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
                         .anyRequest().authenticated())
-                .exceptionHandling(exceptionHandling -> exceptionHandling.authenticationEntryPoint(authenticationEntryPoint()))
+                .exceptionHandling(exceptionHandling -> exceptionHandling
+                        .authenticationEntryPoint(authenticationEntryPoint())
+                        .accessDeniedHandler(accessDeniedHandler()))
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
@@ -77,6 +80,30 @@ public class SecurityConfig {
                     request.getRequestURI());
 
             response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+            response.getWriter().write(objectMapper.writeValueAsString(body));
+        };
+    }
+
+    /**
+     * Mirrors {@link #authenticationEntryPoint()}: authorization failures
+     * (authenticated, but lacking the required role/authority) never reach
+     * {@code GlobalExceptionHandler} either, so this writes the same
+     * {@link ErrorResponse} JSON shape directly, with a 403 status. No
+     * authorization rule uses {@code hasRole}/{@code hasAuthority} yet, so
+     * this isn't exercised today, but it's wired up ahead of M3+ needing it.
+     */
+    @Bean
+    public AccessDeniedHandler accessDeniedHandler() {
+        return (request, response, accessDeniedException) -> {
+            ErrorResponse body = new ErrorResponse(
+                    Instant.now(),
+                    HttpStatus.FORBIDDEN.value(),
+                    "ACCESS_DENIED",
+                    "You do not have permission to access this resource.",
+                    request.getRequestURI());
+
+            response.setStatus(HttpServletResponse.SC_FORBIDDEN);
             response.setContentType(MediaType.APPLICATION_JSON_VALUE);
             response.getWriter().write(objectMapper.writeValueAsString(body));
         };

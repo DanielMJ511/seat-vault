@@ -160,6 +160,40 @@ class AuthIntegrationTest {
                 .andExpect(MockMvcResultMatchers.jsonPath("$.code").value(equalTo("UNAUTHENTICATED")));
     }
 
+    @Test
+    void meWithTamperedTokenIsUnauthorized() throws Exception {
+        User alice = userRepository.findByEmailIgnoreCase(SEEDED_EMAIL).orElseThrow();
+        String token = jwtService.generateToken(alice.getId(), alice.getEmail());
+        String tamperedToken = tamperSignature(token);
+
+        mockMvc.perform(MockMvcRequestBuilders.get("/api/auth/me")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + tamperedToken))
+                .andExpect(MockMvcResultMatchers.status().isUnauthorized())
+                .andExpect(MockMvcResultMatchers.jsonPath("$.code").value(equalTo("UNAUTHENTICATED")));
+    }
+
+    /**
+     * Flips a character in the signature segment of a valid JWT so the
+     * payload/header stay well-formed but the signature no longer verifies —
+     * this exercises the real {@link com.seatvault.seat_vault.security.JwtAuthenticationFilter}
+     * + {@code AuthenticationEntryPoint} together, driven through the actual
+     * {@code SecurityFilterChain} via MockMvc.
+     */
+    private String tamperSignature(String token) {
+        String[] parts = token.split("\\.");
+        char[] signatureChars = parts[2].toCharArray();
+        // Flip a character in the middle of the signature rather than the
+        // last character: base64url's final character of a non-padded
+        // segment only encodes a couple of spare bits, so mutating it can
+        // decode back to the exact same bytes and leave the signature
+        // valid. A middle character always changes the decoded byte value.
+        int index = signatureChars.length / 2;
+        char original = signatureChars[index];
+        signatureChars[index] = original == 'A' ? 'B' : 'A';
+        parts[2] = new String(signatureChars);
+        return parts[0] + "." + parts[1] + "." + parts[2];
+    }
+
     private String registerJson(String email, String password) throws Exception {
         return objectMapper.writeValueAsString(new RegisterRequest(email, password));
     }
