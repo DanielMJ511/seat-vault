@@ -156,7 +156,11 @@ public class HoldService {
 
     @Transactional
     public void releaseHold(Long userId, Long holdId) {
-        Hold hold = holdRepository.findById(holdId)
+        // Locked (not a plain findById) so this can't race with
+        // BookingService#createFromHold converting the same Hold: whichever
+        // of the two commits first, the other blocks here and then re-reads
+        // the committed status below, rather than blindly overwriting it.
+        Hold hold = holdRepository.findByIdForUpdate(holdId)
                 .filter(h -> h.getUser().getId().equals(userId))
                 // Same code whether the hold doesn't exist at all or belongs
                 // to someone else - don't let a non-owner distinguish the two.

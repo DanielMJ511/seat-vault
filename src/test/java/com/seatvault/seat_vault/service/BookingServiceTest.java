@@ -79,7 +79,7 @@ class BookingServiceTest {
     @Test
     void createFromHoldWithMissingHoldIsNotFound() {
         BookingService service = newBookingService();
-        when(holdRepository.findById(999L)).thenReturn(Optional.empty());
+        when(holdRepository.findByIdForUpdate(999L)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.createFromHold(1L, new CreateBookingRequest(999L)))
                 .isInstanceOf(ApiException.class)
@@ -99,7 +99,7 @@ class BookingServiceTest {
                 .status(HoldStatus.ACTIVE)
                 .expiresAt(Instant.now().plusSeconds(300))
                 .build();
-        when(holdRepository.findById(10L)).thenReturn(Optional.of(othersHold));
+        when(holdRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(othersHold));
 
         assertThatThrownBy(() -> service.createFromHold(1L, new CreateBookingRequest(10L)))
                 .isInstanceOf(ApiException.class)
@@ -119,7 +119,7 @@ class BookingServiceTest {
                 .status(HoldStatus.EXPIRED)
                 .expiresAt(Instant.now().minusSeconds(60))
                 .build();
-        when(holdRepository.findById(11L)).thenReturn(Optional.of(expiredHold));
+        when(holdRepository.findByIdForUpdate(11L)).thenReturn(Optional.of(expiredHold));
 
         assertThatThrownBy(() -> service.createFromHold(1L, new CreateBookingRequest(11L)))
                 .isInstanceOf(ApiException.class)
@@ -143,7 +143,7 @@ class BookingServiceTest {
                 // the authoritative per-seat check below must catch this.
                 .expiresAt(Instant.now().minusSeconds(1))
                 .build();
-        when(holdRepository.findById(30L)).thenReturn(Optional.of(ownedHold));
+        when(holdRepository.findByIdForUpdate(30L)).thenReturn(Optional.of(ownedHold));
 
         EventSeat seat = EventSeat.builder()
                 .id(7L)
@@ -167,6 +167,30 @@ class BookingServiceTest {
                     assertThat(apiException.getCode()).isEqualTo("HOLD_NOT_ACTIVE");
                 });
 
+        verify(bookingRepository, never()).save(any());
+    }
+
+    @Test
+    void createFromHoldWithNoHoldSeatsIsRejected() {
+        BookingService service = newBookingService();
+        Hold ownedHold = Hold.builder()
+                .id(31L)
+                .user(User.builder().id(1L).build())
+                .status(HoldStatus.ACTIVE)
+                .expiresAt(Instant.now().plusSeconds(300))
+                .build();
+        when(holdRepository.findByIdForUpdate(31L)).thenReturn(Optional.of(ownedHold));
+        when(holdSeatRepository.findByHoldId(31L)).thenReturn(List.of());
+
+        assertThatThrownBy(() -> service.createFromHold(1L, new CreateBookingRequest(31L)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException apiException = (ApiException) ex;
+                    assertThat(apiException.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(apiException.getCode()).isEqualTo("HOLD_NOT_ACTIVE");
+                });
+
+        verify(eventSeatRepository, never()).findByIdForUpdate(anyLong());
         verify(bookingRepository, never()).save(any());
     }
 
@@ -265,5 +289,37 @@ class BookingServiceTest {
         assertThat(payment.getStatus()).isEqualTo(PaymentStatus.FAILED);
         assertThat(eventSeat.getStatus()).isEqualTo(EventSeatStatus.AVAILABLE);
         assertThat(eventSeat.getCurrentHold()).isNull();
+    }
+
+    /**
+     * PaymentService's contract (see its Javadoc) says only SUCCEEDED or
+     * FAILED are valid synchronous outcomes. A misbehaving implementation
+     * returning PENDING must fail loudly rather than being silently
+     * misread as a decline (which would release seats out from under a
+     * charge that might still be in flight).
+     */
+    @Test
+    void confirmPaymentRejectsAnInvalidPaymentServiceOutcome() {
+        BookingService service = newBookingService();
+        Booking pendingBooking = Booking.builder()
+                .id(43L)
+                .user(User.builder().id(1L).build())
+                .status(BookingStatus.PENDING)
+                .createdAt(Instant.now())
+                .build();
+        when(bookingRepository.findByIdForUpdate(43L)).thenReturn(Optional.of(pendingBooking));
+
+        Payment payment = Payment.builder()
+                .id(92L)
+                .status(PaymentStatus.PENDING)
+                .amount(new BigDecimal("50.00"))
+                .build();
+        when(paymentRepository.findByBookingId(43L)).thenReturn(Optional.of(payment));
+        when(paymentService.charge(pendingBooking, new BigDecimal("50.00"))).thenReturn(PaymentStatus.PENDING);
+
+        assertThatThrownBy(() -> service.confirmPayment(1L, 43L)).isInstanceOf(IllegalStateException.class);
+
+        verify(bookingSeatRepository, never()).findByBookingId(43L);
+        assertThat(pendingBooking.getStatus()).isEqualTo(BookingStatus.PENDING);
     }
 }

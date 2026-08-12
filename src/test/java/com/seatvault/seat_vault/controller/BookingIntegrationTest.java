@@ -13,6 +13,7 @@ import com.seatvault.seat_vault.entity.Event;
 import com.seatvault.seat_vault.entity.EventSeat;
 import com.seatvault.seat_vault.entity.EventSeatStatus;
 import com.seatvault.seat_vault.entity.Hold;
+import com.seatvault.seat_vault.entity.HoldStatus;
 import com.seatvault.seat_vault.entity.Payment;
 import com.seatvault.seat_vault.entity.PaymentStatus;
 import com.seatvault.seat_vault.entity.Seat;
@@ -188,7 +189,7 @@ class BookingIntegrationTest {
             assertThat(reloaded.getStatus()).isEqualTo(EventSeatStatus.BOOKED);
         }
         Hold reloadedHold = holdRepository.findById(holdId).orElseThrow();
-        assertThat(reloadedHold.getStatus()).isEqualTo(com.seatvault.seat_vault.entity.HoldStatus.CONVERTED);
+        assertThat(reloadedHold.getStatus()).isEqualTo(HoldStatus.CONVERTED);
 
         mockMvc.perform(MockMvcRequestBuilders.post("/api/bookings/{id}/confirm", bookingId)
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
@@ -303,6 +304,149 @@ class BookingIntegrationTest {
         assertThat(reloadedBooking.getStatus()).isEqualTo(BookingStatus.CONFIRMED);
         Payment reloadedPayment = paymentRepository.findByBookingId(bookingId).orElseThrow();
         assertThat(reloadedPayment.getStatus()).isEqualTo(PaymentStatus.SUCCEEDED);
+    }
+
+    /**
+     * Regression test for a race a code review caught: {@code
+     * HoldService#releaseHold} and {@code BookingService#createFromHold} both
+     * used to read a Hold via a plain unlocked {@code findById}, so the loser
+     * of a race between "release this hold" and "convert this hold into a
+     * booking" could blindly overwrite the winner's just-committed status
+     * with its own stale one - e.g. a fully paid, CONVERTED hold silently
+     * reported back as EXPIRED. Both methods now lock the Hold row first
+     * ({@code HoldRepository#findByIdForUpdate}), so the loser here must
+     * re-read the committed status and reject cleanly instead. Deliberately
+     * not {@code @Transactional} for the same reason as {@code
+     * parallelConfirmCallsOnlyChargeOnce}: each racing call needs its own
+     * real transaction contending for the same Hold row lock.
+     */
+    @Test
+    void concurrentReleaseAndCreateFromHoldOnSameHoldResolvesConsistently() throws Exception {
+        String token = tokenFor();
+        long holdId = createHold(token, eventSeats.get(0).getId());
+
+        CountDownLatch startGate = new CountDownLatch(1);
+        Callable<Integer> releaseCall = () -> {
+            startGate.await();
+            return mockMvc.perform(MockMvcRequestBuilders.delete("/api/holds/{id}", holdId)
+                            .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                    .andReturn()
+                    .getResponse()
+                    .getStatus();
+        };
+        Callable<Integer> bookCall = () -> {
+            startGate.await();
+            return mockMvc.perform(MockMvcRequestBuilders.post("/api/bookings")
+                            .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(objectMapper.writeValueAsString(new CreateBookingRequest(holdId))))
+                    .andReturn()
+                    .getResponse()
+                    .getStatus();
+        };
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        int releaseStatus;
+        int bookStatus;
+        try {
+            Future<Integer> releaseFuture = executor.submit(releaseCall);
+            Future<Integer> bookFuture = executor.submit(bookCall);
+            startGate.countDown();
+            releaseStatus = releaseFuture.get(30, TimeUnit.SECONDS);
+            bookStatus = bookFuture.get(30, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        boolean releaseWon = releaseStatus == 204;
+        boolean bookWon = bookStatus == 201;
+        // Exactly one side wins - the Hold row lock serializes them, so
+        // whichever transaction commits first leaves the other to observe a
+        // no-longer-ACTIVE Hold and reject with 409.
+        assertThat(releaseWon ^ bookWon).isTrue();
+        if (releaseWon) {
+            assertThat(bookStatus).isEqualTo(409);
+        } else {
+            assertThat(releaseStatus).isEqualTo(409);
+        }
+
+        Hold reloadedHold = holdRepository.findById(holdId).orElseThrow();
+        EventSeat reloadedSeat = eventSeatRepository.findById(eventSeats.get(0).getId()).orElseThrow();
+        if (releaseWon) {
+            assertThat(reloadedHold.getStatus()).isEqualTo(HoldStatus.EXPIRED);
+            assertThat(reloadedSeat.getStatus()).isEqualTo(EventSeatStatus.AVAILABLE);
+            assertThat(bookingRepository.findByHoldId(holdId)).isEmpty();
+        } else {
+            assertThat(reloadedHold.getStatus()).isEqualTo(HoldStatus.CONVERTED);
+            assertThat(reloadedSeat.getStatus()).isEqualTo(EventSeatStatus.BOOKED);
+            assertThat(bookingRepository.findByHoldId(holdId)).isPresent();
+        }
+    }
+
+    /**
+     * Mirrors {@code HoldIntegrationTest#concurrentHoldRequestsForSameSeatOnlyOneWins}
+     * for the booking-creation path: N concurrent {@code createFromHold}
+     * calls for the *same* hold must produce exactly one Booking. Since the
+     * Hold row is now locked before any seat is touched (see the regression
+     * test above), the losers are rejected at the top-level ACTIVE check
+     * rather than deep in the seat-locking loop - still exactly the "only one
+     * side effect" guarantee this test is here to pin down. Deliberately not
+     * {@code @Transactional} for the same reason as the other concurrency
+     * tests in this class.
+     */
+    @Test
+    void parallelCreateFromHoldCallsForSameHoldOnlyCreateOneBooking() throws Exception {
+        String token = tokenFor();
+        long holdId = createHold(token, eventSeats.get(0).getId());
+
+        int threadCount = 10;
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch startGate = new CountDownLatch(1);
+        List<Callable<Integer>> tasks = IntStream.range(0, threadCount)
+                .<Callable<Integer>>mapToObj(i -> () -> {
+                    startGate.await();
+                    return mockMvc.perform(MockMvcRequestBuilders.post("/api/bookings")
+                                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .content(objectMapper.writeValueAsString(new CreateBookingRequest(holdId))))
+                            .andReturn()
+                            .getResponse()
+                            .getStatus();
+                })
+                .toList();
+
+        try {
+            List<Future<Integer>> futures = tasks.stream().map(executor::submit).toList();
+            startGate.countDown();
+
+            List<Integer> statuses = futures.stream().map(f -> {
+                try {
+                    return f.get(30, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }).toList();
+
+            AtomicInteger created = new AtomicInteger();
+            AtomicInteger conflicted = new AtomicInteger();
+            for (int status : statuses) {
+                if (status == 201) {
+                    created.incrementAndGet();
+                } else if (status == 409) {
+                    conflicted.incrementAndGet();
+                }
+            }
+            assertThat(created.get()).isEqualTo(1);
+            assertThat(conflicted.get()).isEqualTo(threadCount - 1);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        Hold reloadedHold = holdRepository.findById(holdId).orElseThrow();
+        assertThat(reloadedHold.getStatus()).isEqualTo(HoldStatus.CONVERTED);
+        EventSeat reloadedSeat = eventSeatRepository.findById(eventSeats.get(0).getId()).orElseThrow();
+        assertThat(reloadedSeat.getStatus()).isEqualTo(EventSeatStatus.BOOKED);
+        assertThat(bookingRepository.findByHoldId(holdId)).isPresent();
     }
 
     private long createHold(String token, Long... seatIds) throws Exception {

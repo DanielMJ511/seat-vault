@@ -214,7 +214,7 @@ class HoldServiceTest {
     @Test
     void releaseHoldWithMissingHoldIsNotFound() {
         HoldService service = newHoldService();
-        when(holdRepository.findById(999L)).thenReturn(Optional.empty());
+        when(holdRepository.findByIdForUpdate(999L)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.releaseHold(1L, 999L))
                 .isInstanceOf(ApiException.class)
@@ -234,7 +234,7 @@ class HoldServiceTest {
                 .status(HoldStatus.ACTIVE)
                 .expiresAt(Instant.now().plusSeconds(300))
                 .build();
-        when(holdRepository.findById(10L)).thenReturn(Optional.of(othersHold));
+        when(holdRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(othersHold));
 
         assertThatThrownBy(() -> service.releaseHold(1L, 10L))
                 .isInstanceOf(ApiException.class)
@@ -254,7 +254,7 @@ class HoldServiceTest {
                 .status(HoldStatus.EXPIRED)
                 .expiresAt(Instant.now().minusSeconds(60))
                 .build();
-        when(holdRepository.findById(11L)).thenReturn(Optional.of(expiredHold));
+        when(holdRepository.findByIdForUpdate(11L)).thenReturn(Optional.of(expiredHold));
 
         assertThatThrownBy(() -> service.releaseHold(1L, 11L))
                 .isInstanceOf(ApiException.class)
@@ -274,7 +274,7 @@ class HoldServiceTest {
                 .status(HoldStatus.ACTIVE)
                 .expiresAt(Instant.now().plusSeconds(300))
                 .build();
-        when(holdRepository.findById(30L)).thenReturn(Optional.of(ownedHold));
+        when(holdRepository.findByIdForUpdate(30L)).thenReturn(Optional.of(ownedHold));
 
         EventSeat seat = EventSeat.builder()
                 .id(6L)
@@ -310,7 +310,7 @@ class HoldServiceTest {
                 .status(HoldStatus.ACTIVE)
                 .expiresAt(Instant.now().plusSeconds(300))
                 .build();
-        when(holdRepository.findById(20L)).thenReturn(Optional.of(ownedHold));
+        when(holdRepository.findByIdForUpdate(20L)).thenReturn(Optional.of(ownedHold));
 
         Hold reassignedHold = Hold.builder()
                 .id(21L)

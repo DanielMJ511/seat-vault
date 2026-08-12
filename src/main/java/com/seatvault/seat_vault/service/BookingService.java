@@ -56,7 +56,11 @@ public class BookingService {
 
     @Transactional
     public BookingResponse createFromHold(Long userId, CreateBookingRequest request) {
-        Hold hold = holdRepository.findById(request.holdId())
+        // Locked (not a plain findById) so this can't race with
+        // HoldService#releaseHold on the same Hold: whichever of the two
+        // commits first, the other blocks here and re-reads the committed
+        // status below, rather than a stale in-memory copy overwriting it.
+        Hold hold = holdRepository.findByIdForUpdate(request.holdId())
                 .filter(h -> h.getUser().getId().equals(userId))
                 // Same code whether the hold doesn't exist at all or belongs
                 // to someone else - don't let a non-owner distinguish the two.
@@ -67,6 +71,13 @@ public class BookingService {
         }
 
         List<HoldSeat> holdSeats = holdSeatRepository.findByHoldId(hold.getId());
+        if (holdSeats.isEmpty()) {
+            // Shouldn't happen - HoldService#createHold never persists a Hold
+            // without at least one HoldSeat - but an ACTIVE Hold with no
+            // seats can't be converted into a meaningful Booking, so reject
+            // rather than silently producing a $0, zero-seat one.
+            throw new ApiException(HttpStatus.CONFLICT, "HOLD_NOT_ACTIVE", "Hold has no seats.");
+        }
         Map<Long, HoldSeat> holdSeatByEventSeatId = new HashMap<>();
         for (HoldSeat holdSeat : holdSeats) {
             holdSeatByEventSeatId.put(holdSeat.getEventSeat().getId(), holdSeat);
@@ -82,24 +93,17 @@ public class BookingService {
                             "Event seat " + seatId + " not found."));
 
             EventSeatStatus effectiveStatus = EventSeatAvailability.effectiveStatus(eventSeat);
-            if (effectiveStatus == EventSeatStatus.AVAILABLE) {
-                // effectiveStatus() resolved AVAILABLE while the seat is still
-                // stored HELD means this hold lazily expired since it was
-                // created (ADR-0002). This transaction is rolling back, so
-                // there's no point reconciling Hold.status here - that write
-                // would just be undone; the sweep/lazy-check will catch it
-                // the next time anything actually touches this seat.
+            if (effectiveStatus != EventSeatStatus.HELD) {
+                // AVAILABLE means this hold lazily expired since it was
+                // created (ADR-0002) - this transaction is rolling back, so
+                // there's no point reconciling Hold.status here, the
+                // sweep/lazy-check will catch it later. BOOKED should be
+                // unreachable now that the Hold row itself is locked above
+                // before this loop runs - any concurrent createFromHold call
+                // racing on the same Hold now serializes there, before
+                // either can touch a seat - but reject defensively rather
+                // than silently trusting that assumption.
                 throw new ApiException(HttpStatus.CONFLICT, "HOLD_NOT_ACTIVE", "Hold is not active.");
-            }
-            if (effectiveStatus == EventSeatStatus.BOOKED) {
-                // A concurrent/duplicate createFromHold call for this same
-                // hold already won this race and converted it - return that
-                // booking's current state rather than surfacing a raw
-                // uq_bookings_hold constraint violation as an unhandled 500.
-                return bookingRepository.findByHoldId(hold.getId())
-                        .map(this::toResponse)
-                        .orElseThrow(() -> new ApiException(HttpStatus.CONFLICT, "HOLD_NOT_ACTIVE",
-                                "Hold is not active."));
             }
 
             eventSeat.setStatus(EventSeatStatus.BOOKED);
@@ -134,6 +138,15 @@ public class BookingService {
         return toResponse(booking, bookingSeats, payment);
     }
 
+    /**
+     * Note: the Booking row lock below is held for the full duration of the
+     * {@link PaymentService#charge} call, blocking any other request against
+     * this Booking (including the client's own retry) for as long as
+     * charging takes. Acceptable for {@link SimulatedPaymentServiceImpl}'s
+     * in-memory call; a future real, network-calling provider would need to
+     * revisit this (e.g. release the lock before charging and re-acquire it
+     * under a fresh idempotency check before writing the outcome).
+     */
     @Transactional
     public BookingResponse confirmPayment(Long userId, Long bookingId) {
         // The sole serialization point for this whole state machine: nothing
@@ -154,6 +167,16 @@ public class BookingService {
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "PAYMENT_NOT_FOUND", "Payment not found."));
 
         PaymentStatus outcome = paymentService.charge(booking, payment.getAmount());
+        if (outcome != PaymentStatus.SUCCEEDED && outcome != PaymentStatus.FAILED) {
+            // A PaymentService implementation bug, not a client error - per
+            // its contract (see PaymentService's Javadoc), PENDING is never a
+            // valid synchronous return value. Fail loudly rather than
+            // misreading it as a decline and releasing seats out from under
+            // a charge that might still be in flight.
+            throw new IllegalStateException(
+                    "PaymentService returned " + outcome + " for booking " + bookingId + "; only SUCCEEDED or "
+                            + "FAILED are valid synchronous outcomes.");
+        }
         payment.setStatus(outcome);
 
         if (outcome == PaymentStatus.SUCCEEDED) {
@@ -176,6 +199,16 @@ public class BookingService {
             EventSeat eventSeat = eventSeatRepository.findByIdForUpdate(seatId)
                     .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "EVENT_SEAT_NOT_FOUND",
                             "Event seat " + seatId + " not found."));
+            // Defensive, mirroring HoldService#releaseHold's ownership guard:
+            // this booking is the only thing that should ever hold a seat in
+            // BOOKED (createFromHold clears currentHold when it sets it), so
+            // this should always be true - but fail loudly instead of
+            // silently stealing a seat if that invariant is ever violated.
+            if (eventSeat.getStatus() != EventSeatStatus.BOOKED) {
+                throw new IllegalStateException(
+                        "Event seat " + seatId + " for booking " + bookingId + " was expected to be BOOKED but was "
+                                + eventSeat.getStatus() + ".");
+            }
             eventSeat.setStatus(EventSeatStatus.AVAILABLE);
             eventSeat.setCurrentHold(null);
         }
