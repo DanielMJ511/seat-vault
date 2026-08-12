@@ -68,6 +68,7 @@ import tools.jackson.databind.ObjectMapper;
 class HoldIntegrationTest {
 
     private static final String RIVERSIDE_EVENT_NAME = "Riverside Jazz Night";
+    private static final String GALA_EVENT_NAME = "Opening Night Gala";
     private static final String SEEDED_EMAIL = "alice@example.com";
 
     @Autowired
@@ -155,6 +156,42 @@ class HoldIntegrationTest {
                         .content(holdRequestJson(seatIds)))
                 .andExpect(MockMvcResultMatchers.status().isBadRequest())
                 .andExpect(MockMvcResultMatchers.jsonPath("$.code").value(equalTo("TOO_MANY_SEATS")));
+    }
+
+    @Test
+    @Transactional
+    void createHoldSpanningMultipleEventsIsRejected() throws Exception {
+        EventSeat riversideSeat = riversideSeats().get(15);
+        EventSeat galaSeat = galaSeats().get(0);
+        String token = tokenFor(aliceId(), SEEDED_EMAIL);
+
+        mockMvc.perform(MockMvcRequestBuilders.post("/api/holds")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(holdRequestJson(riversideSeat.getId(), galaSeat.getId())))
+                .andExpect(MockMvcResultMatchers.status().isBadRequest())
+                .andExpect(MockMvcResultMatchers.jsonPath("$.code").value(equalTo("MULTIPLE_EVENTS_IN_HOLD")));
+
+        EventSeat reloadedRiverside = eventSeatRepository.findById(riversideSeat.getId()).orElseThrow();
+        EventSeat reloadedGala = eventSeatRepository.findById(galaSeat.getId()).orElseThrow();
+        assertThat(reloadedRiverside.getStatus()).isEqualTo(EventSeatStatus.AVAILABLE);
+        assertThat(reloadedGala.getStatus()).isEqualTo(EventSeatStatus.AVAILABLE);
+    }
+
+    @Test
+    @Transactional
+    void createHoldOnAnAlreadyBookedSeatIsRejectedWithDistinctCodeFromHeld() throws Exception {
+        EventSeat seat = riversideSeats().get(16);
+        seat.setStatus(EventSeatStatus.BOOKED);
+        eventSeatRepository.saveAndFlush(seat);
+        String token = tokenFor(aliceId(), SEEDED_EMAIL);
+
+        mockMvc.perform(MockMvcRequestBuilders.post("/api/holds")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(holdRequestJson(seat.getId())))
+                .andExpect(MockMvcResultMatchers.status().isConflict())
+                .andExpect(MockMvcResultMatchers.jsonPath("$.code").value(equalTo("SEAT_ALREADY_BOOKED")));
     }
 
     /**
@@ -344,6 +381,20 @@ class HoldIntegrationTest {
                 .findFirst()
                 .orElseThrow();
         return eventSeatRepository.findByEventIdWithSeatAndHold(riverside.getId());
+    }
+
+    /**
+     * Only used, read-only, by {@code createHoldSpanningMultipleEventsIsRejected}
+     * (which is {@code @Transactional} and asserts nothing about this event's
+     * seats afterward beyond "still AVAILABLE") - safe alongside {@code
+     * EventSeatIntegrationTest}'s own Gala-seat assertions.
+     */
+    private List<EventSeat> galaSeats() {
+        Event gala = eventRepository.findAllWithVenueOrderByStartsAtAsc().stream()
+                .filter(e -> e.getName().equals(GALA_EVENT_NAME))
+                .findFirst()
+                .orElseThrow();
+        return eventSeatRepository.findByEventIdWithSeatAndHold(gala.getId());
     }
 
     private long aliceId() {

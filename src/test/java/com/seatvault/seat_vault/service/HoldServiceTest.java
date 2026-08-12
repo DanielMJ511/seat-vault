@@ -12,6 +12,7 @@ import static org.mockito.Mockito.when;
 
 import com.seatvault.seat_vault.config.HoldProperties;
 import com.seatvault.seat_vault.dto.HoldRequest;
+import com.seatvault.seat_vault.entity.Event;
 import com.seatvault.seat_vault.entity.EventSeat;
 import com.seatvault.seat_vault.entity.EventSeatStatus;
 import com.seatvault.seat_vault.entity.Hold;
@@ -93,6 +94,60 @@ class HoldServiceTest {
                 });
 
         verify(eventSeatRepository, never()).findByIdForUpdate(anyLong());
+    }
+
+    @Test
+    void createHoldSpanningMultipleEventsIsRejected() {
+        HoldService service = newHoldService();
+
+        Event eventOne = Event.builder().id(1L).build();
+        Event eventTwo = Event.builder().id(2L).build();
+        EventSeat seatInEventOne = EventSeat.builder().id(1L).event(eventOne).build();
+        EventSeat seatInEventTwo = EventSeat.builder().id(2L).event(eventTwo).build();
+        when(eventSeatRepository.findAllById(List.of(1L, 2L))).thenReturn(List.of(seatInEventOne, seatInEventTwo));
+
+        assertThatThrownBy(() -> service.createHold(1L, new HoldRequest(List.of(1L, 2L))))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException apiException = (ApiException) ex;
+                    assertThat(apiException.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(apiException.getCode()).isEqualTo("MULTIPLE_EVENTS_IN_HOLD");
+                });
+
+        // Rejected before any locking, since this is a request-shape check.
+        verify(redisLockService, never()).tryLock(anyLong());
+        verify(eventSeatRepository, never()).findByIdForUpdate(anyLong());
+    }
+
+    @Test
+    void createHoldWithSeatAlreadyBookedIsRejectedWithDistinctCodeFromHeld() {
+        HoldService service = newHoldService();
+
+        when(redisLockService.tryLock(1L)).thenReturn(Optional.of("token-1"));
+        when(userRepository.findById(1L)).thenReturn(Optional.of(User.builder().id(1L).build()));
+        when(holdRepository.save(any(Hold.class))).thenAnswer(invocation -> {
+            Hold hold = invocation.getArgument(0);
+            hold.setId(101L);
+            return hold;
+        });
+
+        EventSeat bookedSeat = EventSeat.builder()
+                .id(1L)
+                .status(EventSeatStatus.BOOKED)
+                .price(new BigDecimal("50.00"))
+                .build();
+        when(eventSeatRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(bookedSeat));
+
+        assertThatThrownBy(() -> service.createHold(1L, new HoldRequest(List.of(1L))))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException apiException = (ApiException) ex;
+                    assertThat(apiException.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(apiException.getCode()).isEqualTo("SEAT_ALREADY_BOOKED");
+                });
+
+        verify(redisLockService, times(1)).unlock(1L, "token-1");
+        verify(holdSeatRepository, never()).saveAll(any());
     }
 
     @Test

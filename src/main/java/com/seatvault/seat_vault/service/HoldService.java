@@ -59,6 +59,15 @@ public class HoldService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "TOO_MANY_SEATS",
                     "A hold may cover at most " + holdProperties.maxSeatsPerHold() + " seats.");
         }
+        if (spansMultipleEvents(seatIds)) {
+            // Checked up front, before any locking, so a request that's
+            // invalid by shape never pays for lock acquisition it was always
+            // going to roll back (see ADR-0006: EventSeat.id already encodes
+            // which event a seat belongs to, so this is a cheap lookup, not
+            // a client-supplied eventId cross-check).
+            throw new ApiException(HttpStatus.BAD_REQUEST, "MULTIPLE_EVENTS_IN_HOLD",
+                    "All seats in a hold must belong to the same event.");
+        }
 
         // Seats are locked (both here in Redis and below via Postgres row
         // locks) in a fixed, globally-consistent order (ascending id) so that
@@ -106,11 +115,19 @@ public class HoldService {
                     .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "EVENT_SEAT_NOT_FOUND",
                             "Event seat " + seatId + " not found."));
 
-            if (EventSeatAvailability.effectiveStatus(eventSeat) != EventSeatStatus.AVAILABLE) {
-                // All-or-nothing: rolling back the transaction undoes every
-                // seat/hold mutation made earlier in this loop too.
+            EventSeatStatus effectiveStatus = EventSeatAvailability.effectiveStatus(eventSeat);
+            if (effectiveStatus == EventSeatStatus.BOOKED) {
+                // Permanent unavailability for this event - distinct from
+                // SEAT_ALREADY_HELD below so a client can tell "pick another
+                // seat" from "retry in a bit" (all-or-nothing: rolling back
+                // the transaction undoes every mutation made earlier in this
+                // loop too).
+                throw new ApiException(HttpStatus.CONFLICT, "SEAT_ALREADY_BOOKED",
+                        "Seat " + seatId + " has already been booked for this event.");
+            }
+            if (effectiveStatus != EventSeatStatus.AVAILABLE) {
                 throw new ApiException(HttpStatus.CONFLICT, "SEAT_ALREADY_HELD",
-                        "Seat " + seatId + " is not available.");
+                        "Seat " + seatId + " is currently held by another user.");
             }
 
             Hold staleHold = eventSeat.getCurrentHold();
@@ -180,6 +197,24 @@ public class HoldService {
         // same value a timed-out hold gets - "released" is an API-level
         // action, not a distinct stored state.
         hold.setStatus(HoldStatus.EXPIRED);
+    }
+
+    /**
+     * A plain unlocked lookup, deliberately not routed through {@code
+     * findByIdForUpdate}: this is a request-shape check (does the request
+     * even make sense?), not a concurrency-sensitive one, and running it
+     * before any locking keeps a malformed request cheap to reject. Missing
+     * seat ids are silently skipped here - they're reported precisely as
+     * {@code EVENT_SEAT_NOT_FOUND} later, once locking has begun.
+     */
+    private boolean spansMultipleEvents(List<Long> seatIds) {
+        if (seatIds.size() < 2) {
+            return false;
+        }
+        return eventSeatRepository.findAllById(seatIds).stream()
+                .map(eventSeat -> eventSeat.getEvent().getId())
+                .distinct()
+                .count() > 1;
     }
 
     private static HoldResponse toResponse(Hold hold, List<HoldSeat> holdSeats) {
