@@ -17,6 +17,7 @@ import com.seatvault.seat_vault.entity.HoldStatus;
 import com.seatvault.seat_vault.entity.Payment;
 import com.seatvault.seat_vault.entity.PaymentStatus;
 import com.seatvault.seat_vault.entity.Seat;
+import com.seatvault.seat_vault.entity.User;
 import com.seatvault.seat_vault.entity.Venue;
 import com.seatvault.seat_vault.repository.BookingRepository;
 import com.seatvault.seat_vault.repository.EventRepository;
@@ -50,6 +51,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
@@ -110,6 +112,9 @@ class BookingIntegrationTest {
 
     @Autowired
     private JwtService jwtService;
+
+    @Autowired
+    private PasswordEncoder passwordEncoder;
 
     @Autowired
     private SimulatedPaymentServiceImpl simulatedPaymentService;
@@ -449,6 +454,189 @@ class BookingIntegrationTest {
         assertThat(bookingRepository.findByHoldId(holdId)).isPresent();
     }
 
+    @Test
+    @Transactional
+    void listDetailAndCancelHappyPathsWork() throws Exception {
+        String token = tokenFor();
+        long holdId = createHold(token, eventSeats.get(0).getId(), eventSeats.get(1).getId());
+        long bookingId = createBooking(token, holdId);
+
+        mockMvc.perform(MockMvcRequestBuilders.post("/api/bookings/{id}/confirm", bookingId)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(MockMvcResultMatchers.status().isOk())
+                .andExpect(MockMvcResultMatchers.jsonPath("$.status").value(equalTo("CONFIRMED")));
+
+        // List: other test methods in this class (the non-@Transactional
+        // concurrency ones) leave real, committed bookings behind for this
+        // same seeded user, so assert this booking is present rather than
+        // asserting an exact array length.
+        String listBody = mockMvc.perform(MockMvcRequestBuilders.get("/api/bookings/me")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(MockMvcResultMatchers.status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        JsonNode listJson = objectMapper.readTree(listBody);
+        JsonNode listedBooking = null;
+        for (JsonNode node : listJson) {
+            if (node.get("id").asLong() == bookingId) {
+                listedBooking = node;
+                break;
+            }
+        }
+        assertThat(listedBooking).isNotNull();
+        assertThat(listedBooking.get("status").asText()).isEqualTo("CONFIRMED");
+        assertThat(listedBooking.get("seats").size()).isEqualTo(2);
+
+        // Detail
+        mockMvc.perform(MockMvcRequestBuilders.get("/api/bookings/{id}", bookingId)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(MockMvcResultMatchers.status().isOk())
+                .andExpect(MockMvcResultMatchers.jsonPath("$.id").value(bookingId))
+                .andExpect(MockMvcResultMatchers.jsonPath("$.status").value(equalTo("CONFIRMED")))
+                .andExpect(MockMvcResultMatchers.jsonPath("$.payment.status").value(equalTo("SUCCEEDED")));
+
+        // Cancel
+        mockMvc.perform(MockMvcRequestBuilders.post("/api/bookings/{id}/cancel", bookingId)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(MockMvcResultMatchers.status().isOk())
+                .andExpect(MockMvcResultMatchers.jsonPath("$.status").value(equalTo("CANCELLED")));
+
+        for (EventSeat eventSeat : eventSeats) {
+            EventSeat reloaded = eventSeatRepository.findById(eventSeat.getId()).orElseThrow();
+            assertThat(reloaded.getStatus()).isEqualTo(EventSeatStatus.AVAILABLE);
+            assertThat(reloaded.getCurrentHold()).isNull();
+        }
+
+        mockMvc.perform(MockMvcRequestBuilders.get("/api/bookings/{id}", bookingId)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(MockMvcResultMatchers.status().isOk())
+                .andExpect(MockMvcResultMatchers.jsonPath("$.status").value(equalTo("CANCELLED")));
+    }
+
+    @Test
+    @Transactional
+    void cancelOfNonConfirmedBookingIsRejectedWith409() throws Exception {
+        String token = tokenFor();
+        long holdId = createHold(token, eventSeats.get(0).getId());
+        long bookingId = createBooking(token, holdId);
+
+        // Deliberately left PENDING - never confirmed.
+        mockMvc.perform(MockMvcRequestBuilders.post("/api/bookings/{id}/cancel", bookingId)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(MockMvcResultMatchers.status().isConflict())
+                .andExpect(MockMvcResultMatchers.jsonPath("$.code").value(equalTo("BOOKING_NOT_CONFIRMED")));
+
+        Booking reloadedBooking = bookingRepository.findById(bookingId).orElseThrow();
+        assertThat(reloadedBooking.getStatus()).isEqualTo(BookingStatus.PENDING);
+        EventSeat reloadedSeat = eventSeatRepository.findById(eventSeats.get(0).getId()).orElseThrow();
+        assertThat(reloadedSeat.getStatus()).isEqualTo(EventSeatStatus.BOOKED);
+    }
+
+    @Test
+    @Transactional
+    void cancellationMakesSeatImmediatelyHoldableByAnotherUser() throws Exception {
+        String aliceToken = tokenFor();
+        long holdId = createHold(aliceToken, eventSeats.get(0).getId());
+        long bookingId = createBooking(aliceToken, holdId);
+
+        mockMvc.perform(MockMvcRequestBuilders.post("/api/bookings/{id}/confirm", bookingId)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + aliceToken))
+                .andExpect(MockMvcResultMatchers.status().isOk())
+                .andExpect(MockMvcResultMatchers.jsonPath("$.status").value(equalTo("CONFIRMED")));
+
+        mockMvc.perform(MockMvcRequestBuilders.post("/api/bookings/{id}/cancel", bookingId)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + aliceToken))
+                .andExpect(MockMvcResultMatchers.status().isOk())
+                .andExpect(MockMvcResultMatchers.jsonPath("$.status").value(equalTo("CANCELLED")));
+
+        User bob = userRepository.save(User.builder()
+                .email("bob-booking-test@example.com")
+                .passwordHash(passwordEncoder.encode("Password123!"))
+                .build());
+        String bobToken = tokenFor(bob.getId(), bob.getEmail());
+
+        String holdBody = mockMvc.perform(MockMvcRequestBuilders.post("/api/holds")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + bobToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                                new HoldRequest(List.of(eventSeats.get(0).getId())))))
+                .andExpect(MockMvcResultMatchers.status().isCreated())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        long bobHoldId = objectMapper.readTree(holdBody).get("id").asLong();
+
+        Hold reloadedHold = holdRepository.findById(bobHoldId).orElseThrow();
+        assertThat(reloadedHold.getStatus()).isEqualTo(HoldStatus.ACTIVE);
+        assertThat(reloadedHold.getUser().getId()).isEqualTo(bob.getId());
+        EventSeat reloadedSeat = eventSeatRepository.findById(eventSeats.get(0).getId()).orElseThrow();
+        assertThat(reloadedSeat.getStatus()).isEqualTo(EventSeatStatus.HELD);
+    }
+
+    /**
+     * Mirrors {@code concurrentReleaseAndCreateFromHoldOnSameHoldResolvesConsistently}:
+     * two racing {@code cancel} calls on the same CONFIRMED booking must
+     * serialize on the Booking row lock ({@code cancel}'s Javadoc), leaving
+     * exactly one 200/CANCELLED winner and one 409 loser - not merely "no
+     * crash and no double-release." Deliberately not {@code @Transactional}
+     * so each racing call gets its own real transaction contending for the
+     * same Booking row lock.
+     */
+    @Test
+    void concurrentDoubleCancelOnSameBookingExactlyOneWins() throws Exception {
+        String token = tokenFor();
+        long holdId = createHold(token, eventSeats.get(0).getId());
+        long bookingId = createBooking(token, holdId);
+
+        mockMvc.perform(MockMvcRequestBuilders.post("/api/bookings/{id}/confirm", bookingId)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(MockMvcResultMatchers.status().isOk())
+                .andExpect(MockMvcResultMatchers.jsonPath("$.status").value(equalTo("CONFIRMED")));
+
+        int callCount = 2;
+        ExecutorService executor = Executors.newFixedThreadPool(callCount);
+        CountDownLatch startGate = new CountDownLatch(1);
+        List<Callable<Integer>> tasks = IntStream.range(0, callCount)
+                .<Callable<Integer>>mapToObj(i -> () -> {
+                    startGate.await();
+                    return mockMvc.perform(MockMvcRequestBuilders.post("/api/bookings/{id}/cancel", bookingId)
+                                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                            .andReturn()
+                            .getResponse()
+                            .getStatus();
+                })
+                .toList();
+
+        List<Integer> statuses;
+        try {
+            List<Future<Integer>> futures = tasks.stream().map(executor::submit).toList();
+            startGate.countDown();
+            statuses = futures.stream()
+                    .map(f -> {
+                        try {
+                            return f.get(30, TimeUnit.SECONDS);
+                        } catch (Exception e) {
+                            throw new RuntimeException(e);
+                        }
+                    })
+                    .toList();
+        } finally {
+            executor.shutdownNow();
+        }
+
+        long wins = statuses.stream().filter(status -> status == 200).count();
+        long losses = statuses.stream().filter(status -> status == 409).count();
+        assertThat(wins).isEqualTo(1);
+        assertThat(losses).isEqualTo(callCount - 1);
+
+        Booking reloadedBooking = bookingRepository.findById(bookingId).orElseThrow();
+        assertThat(reloadedBooking.getStatus()).isEqualTo(BookingStatus.CANCELLED);
+        EventSeat reloadedSeat = eventSeatRepository.findById(eventSeats.get(0).getId()).orElseThrow();
+        assertThat(reloadedSeat.getStatus()).isEqualTo(EventSeatStatus.AVAILABLE);
+        assertThat(reloadedSeat.getCurrentHold()).isNull();
+    }
+
     private long createHold(String token, Long... seatIds) throws Exception {
         String body = mockMvc.perform(MockMvcRequestBuilders.post("/api/holds")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
@@ -477,5 +665,9 @@ class BookingIntegrationTest {
     private String tokenFor() {
         long userId = userRepository.findByEmailIgnoreCase(SEEDED_EMAIL).orElseThrow().getId();
         return jwtService.generateToken(userId, SEEDED_EMAIL);
+    }
+
+    private String tokenFor(long userId, String email) {
+        return jwtService.generateToken(userId, email);
     }
 }

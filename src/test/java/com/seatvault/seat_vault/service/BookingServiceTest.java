@@ -322,4 +322,122 @@ class BookingServiceTest {
         verify(bookingSeatRepository, never()).findByBookingId(43L);
         assertThat(pendingBooking.getStatus()).isEqualTo(BookingStatus.PENDING);
     }
+
+    @Test
+    void cancelWithMissingBookingIsNotFound() {
+        BookingService service = newBookingService();
+        when(bookingRepository.findByIdForUpdate(999L)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.cancel(1L, 999L))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException apiException = (ApiException) ex;
+                    assertThat(apiException.getStatus()).isEqualTo(HttpStatus.NOT_FOUND);
+                    assertThat(apiException.getCode()).isEqualTo("BOOKING_NOT_FOUND");
+                });
+
+        verify(bookingSeatRepository, never()).findByBookingId(anyLong());
+    }
+
+    // ADR-0008: a booking owned by someone else collapses into the same 404
+    // as a nonexistent booking id, not a 403 - callers must not learn that a
+    // given booking id exists at all.
+    @Test
+    void cancelOwnedBySomeoneElseIsNotFound() {
+        BookingService service = newBookingService();
+        Booking othersBooking = Booking.builder()
+                .id(50L)
+                .user(User.builder().id(2L).build())
+                .status(BookingStatus.CONFIRMED)
+                .build();
+        when(bookingRepository.findByIdForUpdate(50L)).thenReturn(Optional.of(othersBooking));
+
+        assertThatThrownBy(() -> service.cancel(1L, 50L))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException apiException = (ApiException) ex;
+                    assertThat(apiException.getStatus()).isEqualTo(HttpStatus.NOT_FOUND);
+                    assertThat(apiException.getCode()).isEqualTo("BOOKING_NOT_FOUND");
+                });
+
+        verify(bookingSeatRepository, never()).findByBookingId(anyLong());
+    }
+
+    @Test
+    void cancelOnPendingBookingIsRejectedWithoutSideEffects() {
+        assertCancelOnNonConfirmedBookingIsRejected(51L, BookingStatus.PENDING);
+    }
+
+    @Test
+    void cancelOnFailedBookingIsRejectedWithoutSideEffects() {
+        assertCancelOnNonConfirmedBookingIsRejected(52L, BookingStatus.FAILED);
+    }
+
+    @Test
+    void cancelOnAlreadyCancelledBookingIsRejectedWithoutSideEffects() {
+        assertCancelOnNonConfirmedBookingIsRejected(53L, BookingStatus.CANCELLED);
+    }
+
+    private void assertCancelOnNonConfirmedBookingIsRejected(long bookingId, BookingStatus status) {
+        BookingService service = newBookingService();
+        Booking booking = Booking.builder()
+                .id(bookingId)
+                .user(User.builder().id(1L).build())
+                .status(status)
+                .build();
+        when(bookingRepository.findByIdForUpdate(bookingId)).thenReturn(Optional.of(booking));
+
+        assertThatThrownBy(() -> service.cancel(1L, bookingId))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException apiException = (ApiException) ex;
+                    assertThat(apiException.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(apiException.getCode()).isEqualTo("BOOKING_NOT_CONFIRMED");
+                });
+
+        assertThat(booking.getStatus()).isEqualTo(status);
+        verify(bookingSeatRepository, never()).findByBookingId(anyLong());
+        verify(eventSeatRepository, never()).findByIdForUpdate(anyLong());
+    }
+
+    @Test
+    void cancelOnConfirmedBookingReleasesSeatsAndMarksCancelled() {
+        BookingService service = newBookingService();
+        Booking confirmedBooking = Booking.builder()
+                .id(60L)
+                .user(User.builder().id(1L).build())
+                .status(BookingStatus.CONFIRMED)
+                .createdAt(Instant.now())
+                .build();
+        when(bookingRepository.findByIdForUpdate(60L)).thenReturn(Optional.of(confirmedBooking));
+
+        Seat rawSeat = Seat.builder().section("A").rowLabel("A").seatNumber(1).build();
+        EventSeat eventSeat = EventSeat.builder()
+                .id(9L)
+                .seat(rawSeat)
+                .status(EventSeatStatus.BOOKED)
+                .price(new BigDecimal("50.00"))
+                .build();
+        BookingSeat bookingSeat = BookingSeat.builder()
+                .booking(confirmedBooking)
+                .eventSeat(eventSeat)
+                .priceSnapshot(new BigDecimal("50.00"))
+                .build();
+        when(bookingSeatRepository.findByBookingId(60L)).thenReturn(List.of(bookingSeat));
+        when(eventSeatRepository.findByIdForUpdate(9L)).thenReturn(Optional.of(eventSeat));
+        when(paymentRepository.findByBookingId(60L)).thenReturn(Optional.of(Payment.builder()
+                .id(93L)
+                .status(PaymentStatus.SUCCEEDED)
+                .amount(new BigDecimal("50.00"))
+                .build()));
+
+        service.cancel(1L, 60L);
+
+        assertThat(confirmedBooking.getStatus()).isEqualTo(BookingStatus.CANCELLED);
+        assertThat(eventSeat.getStatus()).isEqualTo(EventSeatStatus.AVAILABLE);
+        assertThat(eventSeat.getCurrentHold()).isNull();
+        verify(eventSeatRepository).findByIdForUpdate(9L);
+        // No refund concept (CONTEXT.md) - the Payment itself is never touched.
+        verify(paymentService, never()).charge(any(), any());
+    }
 }

@@ -31,3 +31,14 @@ Never edit past entries; only append. Spans all milestones.
 - Code review verdict: APPROVED, no findings
 - Files touched: `src/main/java/com/seatvault/seat_vault/controller/BookingController.java`
 - No supplementary ADR: pure controller wiring following the already-established confirm-endpoint pattern — no new decision surfaced
+
+## 2026-08-13 — T-004 Integration + concurrency tests for list/detail/cancel
+- Agents involved: builder only (no escalation, no respins)
+- Test result: full `./mvnw test` suite passed — 80 tests total (70 existing + 10 new), 0 failures, 0 errors, 0 skipped
+- Code review verdict: APPROVED, no findings. Reviewer confirmed coverage matches all of issue #11's Verification scenarios plus the double-cancel concurrency scenario, and that the concurrency test correctly asserts the exact win/loss split rather than just "no crash."
+- Files touched: `src/test/java/com/seatvault/seat_vault/service/BookingServiceTest.java` (6 new unit tests), `src/test/java/com/seatvault/seat_vault/controller/BookingIntegrationTest.java` (4 new integration tests, including a new `tokenFor` helper overload and a `PasswordEncoder` field for the two-user freed-seat scenario)
+- No supplementary ADR: pure test coverage, no new architectural decision surfaced
+
+## 2026-08-13 — M6 milestone (issue #11) implementation complete
+- All tasks (T-001 through T-004) done. All of M6's Verification scenarios from `loop/PLAN.md` are now covered by passing tests: list/detail/cancel happy paths, cancel of a non-CONFIRMED booking rejected with 409, and cancellation verified to make the seat immediately holdable again by another user (plus the double-cancel concurrency race surfaced during grilling).
+- Implementation is complete pending the user's security-review/retro/issue-close steps.
