@@ -22,6 +22,7 @@ import com.seatvault.seat_vault.repository.HoldRepository;
 import com.seatvault.seat_vault.repository.HoldSeatRepository;
 import com.seatvault.seat_vault.repository.PaymentRepository;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -189,7 +190,34 @@ public class BookingService {
         return toResponse(booking);
     }
 
-    private void releaseBookingSeats(Long bookingId) {
+    /**
+     * Mirrors {@code confirmPayment}'s serialization point: the Booking row
+     * lock is the only thing that needs to guard against a double-cancel race
+     * (two concurrent cancel calls on the same booking) - whichever call
+     * commits first flips the status to CANCELLED, and the other blocks here
+     * then re-reads that committed status and rejects with 409 below, rather
+     * than releasing the same seats twice.
+     */
+    @Transactional
+    public BookingResponse cancel(Long userId, Long bookingId) {
+        Booking booking = bookingRepository.findByIdForUpdate(bookingId)
+                .filter(b -> b.getUser().getId().equals(userId))
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "BOOKING_NOT_FOUND", "Booking not found."));
+
+        if (booking.getStatus() != BookingStatus.CONFIRMED) {
+            throw new ApiException(HttpStatus.CONFLICT, "BOOKING_NOT_CONFIRMED", "Booking is not confirmed.");
+        }
+
+        // Hold is already CONVERTED and Payment stays SUCCEEDED - CONTEXT.md
+        // has no refund concept, so neither is touched here.
+        releaseBookingSeats(bookingId);
+        booking.setStatus(BookingStatus.CANCELLED);
+        booking.setUpdatedAt(Instant.now());
+
+        return toResponse(booking);
+    }
+
+    void releaseBookingSeats(Long bookingId) {
         List<Long> seatIds = bookingSeatRepository.findByBookingId(bookingId).stream()
                 .map(bookingSeat -> bookingSeat.getEventSeat().getId())
                 .sorted()
