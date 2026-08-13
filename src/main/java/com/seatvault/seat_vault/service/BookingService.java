@@ -217,6 +217,28 @@ public class BookingService {
         return toResponse(booking);
     }
 
+    /**
+     * Read-only, so unlike {@code confirmPayment}/{@code cancel} this does not
+     * take a row lock via {@code findByIdForUpdate} - there's no read-then-mutate
+     * step here to protect, just a single consistent read. Ownership mismatch and
+     * not-found are collapsed into the same 404 (ADR-0008).
+     */
+    @Transactional(readOnly = true)
+    public BookingResponse getBooking(Long userId, Long bookingId) {
+        Booking booking = bookingRepository.findById(bookingId)
+                .filter(b -> b.getUser().getId().equals(userId))
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "BOOKING_NOT_FOUND", "Booking not found."));
+
+        return toResponse(booking);
+    }
+
+    @Transactional(readOnly = true)
+    public List<BookingResponse> listBookings(Long userId) {
+        return bookingRepository.findByUserIdOrderByCreatedAtDesc(userId).stream()
+                .map(this::toResponse)
+                .toList();
+    }
+
     void releaseBookingSeats(Long bookingId) {
         List<Long> seatIds = bookingSeatRepository.findByBookingId(bookingId).stream()
                 .map(bookingSeat -> bookingSeat.getEventSeat().getId())

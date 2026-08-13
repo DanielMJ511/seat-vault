@@ -2,6 +2,7 @@ package com.seatvault.seat_vault.repository;
 
 import com.seatvault.seat_vault.entity.Booking;
 import jakarta.persistence.LockModeType;
+import java.util.List;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
@@ -22,4 +23,6 @@ public interface BookingRepository extends JpaRepository<Booking, Long> {
     Optional<Booking> findByIdForUpdate(@Param("id") Long id);
 
     Optional<Booking> findByHoldId(Long holdId);
+
+    List<Booking> findByUserIdOrderByCreatedAtDesc(Long userId);
 }
