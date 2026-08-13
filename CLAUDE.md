@@ -55,3 +55,7 @@ The M0-M7 implementation plan is tracked as GitHub issues labeled `milestone` (M
 ### Domain docs
 
 Single-context layout — one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Loop engineering
+
+Milestone implementation runs through a foreground, session-driven loop (no scheduled/unattended automation): `/plan-milestone` derives a task queue from the next open milestone issue and grills it with `mattpocock-skills:grill-with-docs` before any code is written (writing decisions to `docs/adr/` and `CONTEXT.md`); `/orchestrate` drives each task through `builder` → `test-runner` → `code-reviewer` → `docs-writer`, escalating Sonnet → Opus (`implementer`) on repeated failure; `/loop-handoff` checkpoints an in-progress session; `/retro` banks recurring friction into `loop/LESSONS.md`. Working state lives in `loop/` (`PLAN.md`, `STATE.md`, `LESSONS.md`, `HANDOFF.md`, `tasks/`) — regenerated per milestone, distinct from the permanent `docs/adr/`/`CONTEXT.md` records.

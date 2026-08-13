@@ -1,0 +1,26 @@
+{
+  "Stop": [
+    {
+      "matcher": "*",
+      "hooks": [
+        { "type": "command", "command": "echo Stop >> loop/STATE.md" }
+      ]
+    }
+  ],
+  "SubagentStop": [
+    {
+      "matcher": "*",
+      "hooks": [
+        { "type": "command", "command": "echo SubagentStop >> loop/STATE.md" }
+      ]
+    }
+  ],
+  "PreCompact": [
+    {
+      "matcher": "*",
+      "hooks": [
+        { "type": "command", "command": "echo PreCompact >> loop/STATE.md" }
+      ]
+    }
+  ]
+}
