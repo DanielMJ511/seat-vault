@@ -24,3 +24,10 @@ Never edit past entries; only append. Spans all milestones.
 - Code review verdict: APPROVED, with one minor non-blocking note: N+1 query pattern in `listBookings` when mapping each booking through the existing `toResponse` helper — not worth a respin, flagged as a possible future optimization if `GET /api/bookings/me` sees heavy usage
 - Files touched: `src/main/java/com/seatvault/seat_vault/controller/BookingController.java`, `src/main/java/com/seatvault/seat_vault/service/BookingService.java`, `src/main/java/com/seatvault/seat_vault/repository/BookingRepository.java`
 - No supplementary ADR: straightforward extension of already-established patterns (confirmPayment's ownership-check style, ADR-0008's 404 convention, the grilling session's DTO-reuse decision) — nothing new to decide
+
+## 2026-08-13 — T-003 POST /api/bookings/{id}/cancel controller wiring
+- Agents involved: builder only (no escalation, no respins). code-reviewer approved cleanly on the first pass — given upfront context this time about T-004 owning test coverage, avoiding the false-positive review-context gap that happened on T-002.
+- Test result: full `./mvnw test` suite passed — 70 tests, 0 failures, 0 errors, 0 skipped
+- Code review verdict: APPROVED, no findings
+- Files touched: `src/main/java/com/seatvault/seat_vault/controller/BookingController.java`
+- No supplementary ADR: pure controller wiring following the already-established confirm-endpoint pattern — no new decision surfaced

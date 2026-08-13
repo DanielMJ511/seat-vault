@@ -36,6 +36,11 @@ public class BookingController {
         return bookingService.confirmPayment(principal.id(), id);
     }
 
+    @PostMapping("/{id}/cancel")
+    public BookingResponse cancel(@AuthenticationPrincipal AuthenticatedUser principal, @PathVariable Long id) {
+        return bookingService.cancel(principal.id(), id);
+    }
+
     // Literal "/me" is matched ahead of the "/{id}" template by Spring MVC's
     // path specificity rules regardless of declaration order, so this is safe
     // even though it's declared after "/{id}/confirm" above.
