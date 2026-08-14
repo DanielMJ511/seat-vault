@@ -22,6 +22,10 @@ _Avoid_: Ticket, Inventory.
 A temporary, expiring claim on one or more EventSeats (capped at 8 per Hold, to prevent bulk-hoarding) made while a user is checking out, before payment is confirmed.
 _Avoid_: Reservation.
 
+**Expired Hold**:
+A Hold whose claim no longer stands — because its window passed, or because the user gave it up. Expiry is a fact about the Hold, not about the system having noticed it: a Hold whose window has passed is already Expired, whether or not anything has yet recorded it as such. A Hold that was released by its owner is Expired too — "released" is something a user does, not a state a Hold is in.
+_Avoid_: Released, Cancelled, Timed-out (all name routes into this one state, not states of their own).
+
 **Booking**:
 The purchase record for one or more EventSeats, created from a Hold and tracked from PENDING through CONFIRMED, FAILED, or CANCELLED.
 _Avoid_: Reservation, Order.

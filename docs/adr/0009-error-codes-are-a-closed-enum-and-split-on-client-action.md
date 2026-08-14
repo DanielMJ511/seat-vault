@@ -1,0 +1,18 @@
+# Error codes are a closed enum, and two situations get different codes only when the client's next action differs
+
+Error codes started as string literals passed to `ApiException(HttpStatus, code, message)`, which let the same code drift across different HTTP statuses and let a typo invent a new code silently. M7 closes the set: an `ErrorCode` enum owns every code, its HTTP status, and its human-readable description, and `ApiException`'s raw-string constructors are removed so there is no bypass — a single source of truth with a public escape hatch is not one. `SecurityConfig`'s `UNAUTHENTICATED` and `ACCESS_DENIED` are sourced from the same enum even though they're written directly to the response and never travel through `GlobalExceptionHandler`, because a catalogue missing two of its twenty-one codes isn't authoritative.
+
+The second half of the decision is *when two situations deserve distinct codes*: the test is *whether the client's next action differs*, not whether the internal cause differs.
+
+- `HOLD_EXPIRED` splits out of `HOLD_NOT_ACTIVE` because "your hold timed out, start over" is a different action from "that hold was already used." Critically, it is keyed on **domain state, not on which check fired**: a hold is expired whether `HoldSweepService` has already flipped it to `EXPIRED` or it's still stored `ACTIVE` with `expiresAt` in the past. Keying it on the throw site instead would have returned two different codes for one user-visible situation depending on whether a background sweep happened to have run — observable nondeterminism that ADR-0002's lazy-expiry design exists specifically to hide from clients. `HOLD_NOT_ACTIVE` narrows to `CONVERTED` holds and the defensive zero-seat branch.
+- `SEAT_ALREADY_HELD` stays **merged** across its two mechanisms — losing the Redis contention lock (`HoldService`, fail-fast) and finding the seat `HELD` in Postgres (the authoritative check). The mechanisms are entirely different; the client's action is identical ("retry shortly"). Merging them is also what makes ADR-0001 falsifiable: with Redis unavailable the fail-fast path is unreachable, so an unchanged response proves Redis was never load-bearing for correctness.
+
+## Consequences
+
+Adding an error code now means editing the enum, which is the point — but it also means a contributor cannot express a one-off code inline, even temporarily. That friction is deliberate.
+
+The `HOLD_EXPIRED` split is a **breaking change to the API contract**: a caller previously matching on `HOLD_NOT_ACTIVE` for a timed-out hold must now also handle `HOLD_EXPIRED`. Accepted because the API has no external consumers yet and the ambiguity gets more expensive to unwind the longer it stands.
+
+Because the enum pairs each code with its status structurally, no separate drift-detection test is needed — the compiler enforces what a test would otherwise assert. The enum's description field also feeds T-005's OpenAPI `@ApiResponse` examples, making the generated document the consumer-facing catalogue rather than a hand-maintained Markdown table that would drift from the enum immediately.
+
+Note that this ADR governs *which code* is returned, not *how much a caller is told*. ADR-0008's deliberate collapse of "not found" and "not owned" into one 404 is a different rule — it withholds information from a non-owner on purpose — and the "split when the client's action differs" test here does not reopen it.
