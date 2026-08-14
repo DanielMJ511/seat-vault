@@ -373,3 +373,72 @@ Never edit past entries; only append. Spans all milestones.
 - Note for T-005: `ErrorCode`'s description field is the source the OpenAPI `@ApiResponse`
   examples must draw from, per ADR-0009 — the generated document is the consumer-facing catalogue,
   and there is deliberately no hand-maintained Markdown table.
+
+## 2026-08-14 — T-005 OpenAPI operation/response examples across the API surface
+- Agents involved: builder (1 pass, no respin), test-runner, code-reviewer (1 pass, APPROVED).
+- What was built: `@Operation` summaries, `@SecurityRequirement`, and `@ApiResponse` entries at
+  depth (b) across all six controllers (`AuthController`, `VenueController`, `EventController`,
+  `EventSeatController`, `HoldController`, `BookingController`), covering 13 operations. An
+  `@OpenAPIDefinition` title/description block was added to `OpenApiConfig`, which previously
+  registered the `bearerAuth` scheme but had nothing referencing it, so Swagger UI showed an
+  Authorize button that applied to no operation. `@Schema` examples were added on `ErrorResponse`
+  only — the one DTO the packet permitted; the other 14 were deliberately excluded as depth (c)
+  noise. New `src/test/java/com/seatvault/seat_vault/config/OpenApiDocumentationTest.java` (7
+  tests) fetches `/v3/api-docs` via MockMvc and asserts, for all 13 operations: the operation
+  exists, has a non-blank summary, its response-status set matches exactly (not as a superset),
+  and its security requirement matches expected `bearerAuth` presence; also asserts
+  `components.securitySchemes.bearerAuth` is registered as `type: http`, `scheme: bearer`.
+- Status sets were derived from the code, not boilerplate. The builder walked each service
+  method's actual `ApiException` throws, plus `GlobalExceptionHandler`'s three handler-owned codes
+  and `SecurityConfig`'s `UNAUTHENTICATED` entry point. Review spot-checked this in both
+  directions — a documented status an endpoint cannot return is as much a defect as a missing
+  one — and found no over-documentation. It specifically verified the subtle `PAYMENT_NOT_FOUND`
+  case: `confirm`, `cancel`, `getById` and `listMine` all route through `BookingService`'s private
+  single-argument `toResponse(Booking)` helper, which can genuinely throw it, while `create` uses
+  the three-argument overload and correctly does not document it.
+- `bearerAuth` placement follows ADR-0004, not a GET/POST heuristic: venue, event and event-seat
+  GETs carry none (caller-independent responses); `GET /api/auth/me`, all hold operations and all
+  booking operations carry it.
+- **A security defect was found and deliberately not fixed here — now tracked as T-008.**
+  `GET /api/bookings/me` and `GET /api/bookings/{id}` are user-scoped but fall through
+  `SecurityConfig`'s blanket `GET /api/**` permitAll; only `GET /api/auth/me` has a carve-out
+  ahead of it. An anonymous request is admitted with no `Authentication`,
+  `@AuthenticationPrincipal AuthenticatedUser` resolves to null, and `principal.id()` throws an
+  NPE that `GlobalExceptionHandler`'s catch-all turns into a 500 rather than a 401. Confirmed
+  empirically with a throwaway MockMvc probe (created, run, deleted — not in the diff) and
+  independently verified against `SecurityConfig`'s matcher order. No data is disclosed today —
+  the NPE fires before any repository call — but the auth boundary holds by accident of a null
+  dereference rather than by configuration, and a future null-tolerant rewrite of that controller
+  would convert it into a real leak. `SecurityConfig`'s own Javadoc already names "my bookings" as
+  the example of a future user-scoped GET requiring a carve-out — M6 added exactly that endpoint
+  without one, so a written instruction in the right file naming the right endpoint still failed
+  to prevent the bug. T-008 therefore requires a test pinning the boundary rather than another
+  comment.
+- Review endorsed documenting the intended contract over current reality: both operations are
+  annotated `bearerAuth` even though `SecurityConfig` does not currently enforce it. The
+  alternative — omitting it because enforcement is absent — would make the generated document
+  complicit in the bug by presenting an accidental gap as intended design, and would need
+  reverting the moment T-008 lands. `BookingController` carries a class-level Javadoc explaining
+  the gap and the NPE-to-500 mechanism, and `OpenApiDocumentationTest` asserts `bearerAuth` on
+  both with a cross-reference comment.
+- Code review verdict: APPROVED, no critical or major findings. All five priority questions
+  verified against the actual service, security and exception-handler source rather than the
+  diff's self-description. Two non-blocking observations: (a) ADR-0009's "cannot drift from the
+  enum" guarantee is aspirational for the free-text `description` attributes specifically —
+  `@ApiResponse`/`@ExampleObject` values must be compile-time constants, so
+  `ErrorCode.X.name()`/`.getDescription()` cannot be referenced and literals are unavoidable;
+  review checked several description/enum pairs and found no semantic drift, but the coupling is
+  by convention rather than mechanically enforced; (b) a nit — the `// ErrorCode.X` line comments
+  above several operations duplicate information already in the `@ApiResponse` descriptions.
+- No production behaviour change — annotations and Javadoc only; review confirmed no method
+  bodies changed and no logic smuggled into controllers.
+- Test result: full `./mvnw test` green — 106 tests (99 + 7 new), 0 failures, 0 errors, 0 skipped,
+  56.7s. `OpenApiDocumentationTest` passed standalone (21.5s). No status-set mismatches.
+- Files touched: all six controllers in `src/main/java/com/seatvault/seat_vault/controller/`,
+  `config/OpenApiConfig.java`, `dto/ErrorResponse.java`, and new
+  `src/test/java/com/seatvault/seat_vault/config/OpenApiDocumentationTest.java`.
+- No supplementary ADR: ADR-0004, ADR-0008 and ADR-0009 already govern everything decided here —
+  nothing new surfaced.
+- Milestone note: T-005 was M7's last originally-planned task. All of issue #12's deliverables are
+  now implemented. The issue's second verification step — a manual Swagger UI smoke test —
+  remains for the user, and T-008 remains open.
