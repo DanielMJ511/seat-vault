@@ -33,7 +33,20 @@ public interface EventSeatRepository extends JpaRepository<EventSeat, Long> {
     @Query("select es from EventSeat es where es.id = :id")
     Optional<EventSeat> findByIdForUpdate(@Param("id") Long id);
 
-    List<EventSeat> findByCurrentHoldId(Long holdId);
+    /**
+     * Projects the ids of the seats a hold currently points at, deliberately
+     * never materializing {@code EventSeat} entities - the same discipline,
+     * and for the same reason, as {@link #findDistinctEventIdsByIdIn} below
+     * (ADR-0010). {@code HoldService#releaseHold} uses this to gather its
+     * candidate seats before locking each one with {@link
+     * #findByIdForUpdate}; the obvious {@code findByCurrentHoldId} spelling
+     * of this query returned managed entities and silently defeated that
+     * lock, so it was deleted rather than left available to be reached for
+     * again. See {@code HoldReleaseSeatLockRaceIntegrationTest} for the race
+     * that pins it.
+     */
+    @Query("select es.id from EventSeat es where es.currentHold.id = :holdId")
+    List<Long> findIdsByCurrentHoldId(@Param("holdId") Long holdId);
 
     /**
      * Projects only the distinct {@code event_id}s for a set of seat ids,
@@ -48,7 +61,8 @@ public interface EventSeatRepository extends JpaRepository<EventSeat, Long> {
      * findByIdForUpdate} call on the same id, instead of refreshing it from
      * the fresh, lock-protected row - silently defeating the lock under real
      * concurrent contention. See {@code HoldRedisUnavailableRaceIntegrationTest}
-     * (T-003) for the race that caught this.
+     * (T-003) for the race that caught this, and ADR-0010 for the general
+     * rule this and {@link #findIdsByCurrentHoldId} both exist to keep.
      */
     @Query("select distinct es.event.id from EventSeat es where es.id in :ids")
     List<Long> findDistinctEventIdsByIdIn(@Param("ids") List<Long> ids);

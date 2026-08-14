@@ -277,7 +277,7 @@ class HoldServiceTest {
                 .price(new BigDecimal("50.00"))
                 .currentHold(ownedHold)
                 .build();
-        when(eventSeatRepository.findByCurrentHoldId(30L)).thenReturn(List.of(seat));
+        when(eventSeatRepository.findIdsByCurrentHoldId(30L)).thenReturn(List.of(seat.getId()));
         when(eventSeatRepository.findByIdForUpdate(6L)).thenReturn(Optional.of(seat));
 
         service.releaseHold(1L, 30L);
@@ -290,11 +290,22 @@ class HoldServiceTest {
     /**
      * Regression test for the race a code review caught: releaseHold must
      * re-verify seat ownership under the seat's own row lock
-     * ({@code findByIdForUpdate}), not trust the unlocked candidate list from
-     * {@code findByCurrentHoldId}. Here the seat has already been reassigned
-     * to a different hold (e.g. a concurrent createHold reconciled it via
-     * lazy expiry, ADR-0002) by the time the row lock is taken - releaseHold
-     * must leave it untouched rather than clobbering the new owner.
+     * ({@code findByIdForUpdate}), not trust the unlocked candidate list.
+     * Here the seat has already been reassigned to a different hold by the
+     * time the row lock is taken - releaseHold must leave it untouched rather
+     * than clobbering the new owner.
+     *
+     * <p><b>This test cannot see the bug that actually mattered here, and is
+     * kept only for the branch coverage.</b> It passed unchanged for the
+     * whole life of the T-006 defect: it stubs {@code findByIdForUpdate} to
+     * hand back a seat carrying the new owner, which is precisely what the
+     * production code could <em>not</em> get, because the candidate lookup
+     * had already put its own pre-lock snapshot of that seat in the
+     * persistence context and Hibernate's identity map returned that instead
+     * (ADR-0010). A mock has no identity map, so the one thing that broke is
+     * the one thing it cannot express. {@code
+     * HoldReleaseSeatLockRaceIntegrationTest} is the test that fails when
+     * this regresses.
      */
     @Test
     void releaseHoldDoesNotClobberASeatReassignedToADifferentHoldSinceCandidateListWasRead() {
@@ -318,7 +329,7 @@ class HoldServiceTest {
                 .price(new BigDecimal("50.00"))
                 .currentHold(reassignedHold)
                 .build();
-        when(eventSeatRepository.findByCurrentHoldId(20L)).thenReturn(List.of(seat));
+        when(eventSeatRepository.findIdsByCurrentHoldId(20L)).thenReturn(List.of(seat.getId()));
         when(eventSeatRepository.findByIdForUpdate(5L)).thenReturn(Optional.of(seat));
 
         service.releaseHold(1L, 20L);

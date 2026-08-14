@@ -34,7 +34,9 @@ import org.springframework.transaction.annotation.Transactional;
  * expiry is reconciled lazily, inside the very transaction that's about to
  * reuse it, rather than depending on the scheduled sweep). ADR-0003 is why
  * {@link HoldSeat#getPriceSnapshot()} is captured from {@link EventSeat#getPrice()}
- * right here and never re-read later.
+ * right here and never re-read later. ADR-0010 is why neither
+ * {@code createHold}'s pre-check nor {@code releaseHold}'s candidate lookup
+ * may load an {@code EventSeat} entity before the locking loop runs.
  */
 @Service
 @RequiredArgsConstructor
@@ -170,15 +172,24 @@ public class HoldService {
             throw new ApiException(HttpStatus.CONFLICT, "HOLD_NOT_ACTIVE", "Hold is not active.");
         }
 
-        // findByCurrentHoldId is an unlocked read, good enough to gather
-        // candidate seat ids, but the actual read-check-write must happen
-        // under each seat's own row lock (same as createHoldWithSeatsLocked)
-        // - otherwise a concurrent createHold that has already reassigned
-        // this seat to a brand-new hold (via lazy-expiry reconciliation,
-        // ADR-0002) could be silently clobbered by this release. Sorted
+        // This is an unlocked read, good enough to gather candidate seat ids,
+        // but the actual read-check-write must happen under each seat's own
+        // row lock (same as createHoldWithSeatsLocked) - otherwise a
+        // concurrent transaction that has already re-homed this seat onto a
+        // brand-new hold could be silently clobbered by this release. Sorted
         // ascending for the same deadlock-avoidance reason as createHold.
-        List<Long> seatIds = eventSeatRepository.findByCurrentHoldId(holdId).stream()
-                .map(EventSeat::getId)
+        //
+        // It must be a scalar id projection, never an entity query such as
+        // the findByCurrentHoldId this used to call (ADR-0010): loading
+        // managed EventSeat entities here would put this transaction's
+        // pre-lock snapshot of them into the Hibernate session, and the
+        // identity map would then hand that same stale instance back to the
+        // findByIdForUpdate below instead of the freshly-locked row - so the
+        // ownership guard would re-check the value it had already read and
+        // the row lock would decide nothing. That is not hypothetical: with
+        // the entity query in place, HoldReleaseSeatLockRaceIntegrationTest
+        // reproducibly destroyed a live hold belonging to another user.
+        List<Long> seatIds = eventSeatRepository.findIdsByCurrentHoldId(holdId).stream()
                 .sorted()
                 .toList();
 

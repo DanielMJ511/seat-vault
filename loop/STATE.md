@@ -123,3 +123,75 @@ Never edit past entries; only append. Spans all milestones.
   `src/test/java/com/seatvault/seat_vault/service/RedisLockServiceTest.java` (new),
   `src/test/java/com/seatvault/seat_vault/config/BrokenRedisTestConfig.java` (new),
   `src/test/java/com/seatvault/seat_vault/controller/HoldRedisUnavailableRaceIntegrationTest.java` (new)
+
+## 2026-08-14 — T-006 Fix stale-entity lock defeat in HoldService.releaseHold + ADR-0010
+- Origin: unplanned, added mid-milestone from T-003's code review.
+- Agents involved: implementer (spawned directly, no builder attempt — code review classified this
+  as a critical production concurrency defect needing careful Hibernate reasoning), test-runner,
+  code-reviewer (1 pass, APPROVED).
+- What was fixed: `HoldService.releaseHold` used `eventSeatRepository.findByCurrentHoldId(holdId)`
+  — an entity query returning fully-managed `EventSeat` instances — before its locking loop, so
+  Hibernate's identity map returned those stale instances from the later `findByIdForUpdate`, and
+  the ownership guard re-checked pre-lock data. Replaced with a scalar projection
+  `findIdsByCurrentHoldId` (`select es.id from EventSeat es where es.currentHold.id = :holdId`),
+  mirroring T-003's fix. `findByCurrentHoldId` had no other production callers and was deleted
+  rather than left beside the safe method as an attractive shortcut. `entityManager.clear()` was
+  rejected — more strongly than in T-003, because `releaseHold` has deliberately locked a `Hold` it
+  is about to mutate, and clearing would detach it mid-transaction.
+- **Important correction to the task packet's premise, verified empirically:** the exploit trace in
+  the T-006 packet (and asserted by both the orchestrator and the previous code review) was wrong
+  in one step. It claimed a competing thread could reassign the seat and *commit* underneath the
+  release. It cannot: `releaseHold` locks the `holds` row first, and every production path that
+  re-homes a seat away from that hold also writes the hold's row in the same transaction. The
+  competitor therefore queues behind the release. The implementer confirmed this with two throwaway
+  probes against real Postgres (one observing the competing `createHold` blocked with
+  `ungrantedLocks=1`; the other observing Postgres raise `deadlock detected`). Code review
+  independently re-derived the same conclusion and extended it:
+  `HoldSweepService.sweepExpiredHolds()` is affected the same way. Consequence: the clobber this
+  task fixes is **latent**, masked by the hold-row lock, and the ownership guard it protects is
+  currently unreachable. The fix is therefore defense-in-depth rather than a live-bug fix — correct
+  and worth having, since the masking is an accident of the current call graph rather than a
+  guarantee, but it should not be described as closing an actively-exploitable hole. ADR-0010 and
+  the code comments are hedged accordingly.
+- **A third defect was discovered while proving the above** and is tracked as new task **T-007**
+  (already added to `loop/PLAN.md`): `releaseHold` acquires holds→seats while `createHold` and
+  `HoldSweepService` acquire seats→holds — an ABBA lock-order inversion that deadlocks, so Postgres
+  kills one transaction and a legitimate release racing a create returns a 500. This one is live.
+  The second lock on the seats→holds side is invisible at the call site: it is Hibernate flushing a
+  dirtied entity, not an explicit lock call, which is why it survived review.
+- Regression test: `HoldReleaseSeatLockRaceIntegrationTest.java`, written before the fix and
+  confirmed to fail against unfixed code — 4/4 deterministic failures pre-fix
+  (`expected: HELD but was: AVAILABLE`, the release clearing a seat owned by another user's live
+  ACTIVE hold), 6/6 passes post-fix. Code review independently verified both halves by stashing the
+  fix, re-running (clean fast failure in 1.47s, not a timeout), and restoring. Because the realistic
+  reassignment paths are all blocked by the hold-row lock, the test drives the reassignment through
+  a deliberately constructed transaction that bypasses `HoldSweepService` — legitimate as a
+  forward-looking guard for ADR-0010's discipline, but manufactured rather than a
+  currently-reachable production sequence.
+- ADR-0010 written by the implementer as part of this task's diff:
+  `docs/adr/0010-no-unlocked-entity-reads-before-a-row-lock.md` — "A row lock is only as fresh as
+  the persistence context: no unlocked entity read may precede it in the same transaction." States
+  the rule in checkable form, names all dependent call sites, records both real bugs and the
+  rejected alternatives, and notes that Mockito structurally cannot catch this bug class.
+- Code review verdict: APPROVED, no critical findings. Three non-blocking items were raised and are
+  NOT yet addressed — a follow-up attempt was cut short by an API session limit before making any
+  changes, so they are carried into T-007's packet: (1, most significant)
+  `awaitBlockedOnARowLock()` polls `select count(*) from pg_locks where not granted` unscoped by
+  relation or PID; `HoldSweepService`'s ungated 30s `@Scheduled` sweep could in principle unblock
+  the thief early and pass the test for the wrong reason given the test's deliberately-expired
+  fixture — not observed in practice (isolated runs ~15-17s, poll resolving in ~1.5s, full-suite
+  green), so a latent flakiness risk rather than an active failure; (2) the test javadoc should
+  state plainly that its thief transaction is manufactured and bypasses `HoldSweepService`; (3)
+  trivia — a javadoc line reference cites `HoldService.java:163` where the actual lock is at 165,
+  and ADR-0010's paragraphs are denser than the house style set by ADR-0001/0002.
+- Test result: full `./mvnw test` green — 97 tests, 0 failures, 0 errors, 0 skipped, 53.8s. Three
+  independent standalone repeat runs of the new regression test all passed (~17s each).
+  `HoldServiceTest` (11), `HoldIntegrationTest` (8), `NoOversellIntegrationTest` (2) all green — no
+  regression from the `HoldService` change.
+- Files touched: `src/main/java/com/seatvault/seat_vault/service/HoldService.java`,
+  `src/main/java/com/seatvault/seat_vault/repository/EventSeatRepository.java`,
+  `src/test/java/com/seatvault/seat_vault/service/HoldServiceTest.java`,
+  `src/test/java/com/seatvault/seat_vault/service/HoldReleaseSeatLockRaceIntegrationTest.java`
+  (new), `docs/adr/0010-no-unlocked-entity-reads-before-a-row-lock.md` (new)
+- No supplementary ADR written by docs-writer: ADR-0010 was already written by the implementer as
+  part of this task's diff.
