@@ -195,3 +195,110 @@ Never edit past entries; only append. Spans all milestones.
   (new), `docs/adr/0010-no-unlocked-entity-reads-before-a-row-lock.md` (new)
 - No supplementary ADR written by docs-writer: ADR-0010 was already written by the implementer as
   part of this task's diff.
+
+## 2026-08-14 — T-007 Fix the holds↔seats lock-order inversion (deadlock → 500) + ADR-0011
+- Origin: unplanned, discovered while proving T-006. M7's second unplanned task.
+- Agents involved: implementer (spawned directly; a first attempt at unrelated T-006 follow-up
+  work had been killed by an API session limit, but this run completed), test-runner,
+  code-reviewer (2 attempts — the first stalled on a watchdog before reading the diff; the second
+  completed and returned APPROVED).
+- The defect: `HoldService.releaseHold` and `BookingService.createFromHold` locked the `holds` row
+  before `event_seats` rows, while `HoldService.createHold` and `HoldSweepService` lock
+  `event_seats` before `holds` — an ABBA deadlock. Postgres detects the cycle and aborts one
+  transaction with `CannotAcquireLockException`, which `GlobalExceptionHandler`'s catch-all turns
+  into a 500 on a legitimate request. Reproduced deterministically before the fix, with Postgres
+  reporting `deadlock detected ... while updating tuple in relation "holds"` raised from
+  `AbstractFlushingEventListener.performExecutions` — i.e. from Hibernate flushing a dirtied
+  entity, the invisible lock at the heart of the defect. Postgres chose the create as the victim,
+  so the user who merely grabbed a legitimately-expired seat received the 500.
+- Three offenders, not two. The task packet listed `releaseHold` (holds-first) against
+  `createHold` and the sweep (seats-first). Implementation found `BookingService.createFromHold`
+  was a second holds-first site, on a mundane trigger: a user clicking "book" on a hold that
+  lazily expired moments earlier while someone else takes the seat. A fix covering only
+  `releaseHold` would have left it live.
+- Fix direction chosen: option A (invert the holds-first sites to seats-first), covering all three
+  offenders. Option B (stop the seats-first sides writing holds inside the seat loop) was rejected
+  on its own terms rather than on cost: `createFromHold` had no per-seat ownership check, so an
+  expired-but-still-ACTIVE hold whose seat had been re-homed would pass both its
+  `hold.getStatus() != ACTIVE` and `effectiveStatus != HELD` checks (the seat IS legitimately
+  HELD — by the new owner) and would book another user's seat. `createHold`'s inline
+  reconciliation was the only thing preventing that, so removing it would have traded a 500 for a
+  silent double-booking. A "make everything holds-first" variant was also rejected as not
+  implementable: which `holds` rows `createHold` must write is discovered from the seats, so any
+  pre-read of them is unlocked and can be stale — a best-effort ordering, which is not an ordering.
+  `releaseHold` and `createFromHold` now gather seat ids unlocked (projection / untouched lazy
+  proxies, per ADR-0010), lock every seat ascending, then lock the `holds` row and authorize.
+  `createFromHold` also gained the per-seat ownership guard it was missing. `createHold` and
+  `HoldSweepService` needed no behavioural change and gained comments stating the order and why.
+- Most significant finding — T-006's fix is now load-bearing, not defense-in-depth. Pre-T-007,
+  `releaseHold` pinned the `holds` row for its whole transaction, so T-006's clobber interleaving
+  was unreachable and its ownership guard was effectively dead code. With the hold lock now taken
+  last, a competitor CAN commit a seat re-homing while a release is parked on an earlier seat, so
+  the interleaving became reachable the moment this task landed. Verified twice independently — by
+  the implementer and again by the code reviewer — by deleting the guard post-fix and observing
+  T-006's regression test fail (`expected: HELD but was: AVAILABLE`), then restoring it and
+  confirming green. ADR-0010's caveat had said the masking was "one lock in one method away from
+  being false"; it was false one task later, and that paragraph was rewritten. Reverting ADR-0010's
+  discipline would now cost a live double-booking rather than a theoretical one.
+- Two deliberate behaviour changes, both pinned by tests: (1) Releasing a hold that a concurrent
+  `createHold` just reconciled now returns 409 `HOLD_NOT_ACTIVE`. The code review corrected the
+  framing here: this is not "204 → 409" as originally described, because the losing side of that
+  race was previously the deadlock victim — the honest comparison is "500 → 409", which is
+  unambiguously an improvement and reuses ADR-0007's existing semantics rather than inventing
+  behaviour. (2) `createFromHold` on a non-ACTIVE hold now takes and rolls back seat locks before
+  rejecting — mechanically forced by the reordering, since seat ids must come from an unlocked
+  read before any lock exists to check status against. A test named `...IsRejectedBeforeLocking`
+  was rewritten as `createFromHoldWithNonActiveHoldIsRejectedAfterTheSeatsAreLocked`. Review
+  scrutinised this specifically and judged it a legitimate contract change rather than a
+  normalised regression: the new test asserts the lock WAS taken and rolled back (verifying
+  `eventSeatRepository.findByIdForUpdate(12L)`) rather than deleting the inconvenient assertion.
+- ADR-0011 written by the implementer as part of this task's diff:
+  `docs/adr/0011-event-seats-is-locked-before-holds-everywhere.md`. A new ADR rather than an
+  extension of 0010, because the ordering rule is separately checkable, applies to code with no
+  ORM involvement (the sweep's bulk statements, which ADR-0010 has nothing to say about), and
+  fails differently — a loud 500 versus silent corruption. Its headline is the invisible-lock
+  hazard ("dirtying an entity counts as locking it"), and it states the checkable form as "in what
+  order does this transaction first touch a row in each table, by any means" rather than "in what
+  order does it call `findByIdForUpdate`". ADR-0010 gained a cross-reference and the corrected
+  caveat.
+- Carried-forward items from T-006's review, all addressed here: the `pg_locks` poll in
+  `HoldReleaseSeatLockRaceIntegrationTest` is now scoped by both backend PID and relation, derived
+  by probing real Postgres rather than guessed. The thief javadoc now states plainly that the
+  transaction is manufactured and bypasses `HoldSweepService`. The stale `HoldService.java:163`
+  line reference was removed and ADR-0010's two densest paragraphs were split into five.
+- Deliberately not done, recorded in ADR-0011's consequences: isolation level left at default
+  `READ COMMITTED` on all touched methods — none of T-003/T-006/T-007 is an isolation problem,
+  all three reproduce identically at `SERIALIZABLE`, since the mechanism is row-lock ordering and
+  the ORM persistence context rather than snapshot visibility. No `@Transactional(timeout)` /
+  `lock_timeout` backstop was added: deadlocks are auto-detected in about a second, and a timeout
+  risks turning legitimate load-test contention into spurious failures.
+- Known residual, disclosed not fixed: the sweep's bulk `UPDATE` locks `event_seats` rows in
+  plan-scan order rather than ascending id, so seat-versus-seat ordering between the sweep and a
+  multi-seat hold remains theoretically deadlock-prone — independent of the table-versus-table
+  ordering fixed here. Recorded in ADR-0011's consequences as a candidate follow-up, judged
+  acceptable to leave since it is now a rare seat-vs-seat case rather than the ABBA cycle this
+  task closed.
+- Code review verdict: APPROVED, no critical findings. Lock order verified consistent on every
+  path touching both tables, including implicit flush-time locks. ADR-0008's 404-not-403
+  semantics verified intact. One minor disclosed finding: because seat locks are now taken from an
+  ownership-blind read, a caller who does not own a hold but knows its id can cause brief row
+  locks on another user's seats before receiving the 404 — bounded to microseconds and rolled
+  back, already disclosed in ADR-0011's "What the reordering cost", but a residual worth awareness
+  as a minor timing side-channel.
+- Test result: full `./mvnw test` green — 99 tests (97 + a deadlock reproduction test + a
+  `createFromHold` ownership-guard unit test), 0 failures, 0 errors, 0 skipped, 61s.
+  `HoldLockOrderDeadlockIntegrationTest` and `HoldReleaseSeatLockRaceIntegrationTest` each passed 3
+  consecutive standalone runs; the concurrency suites (`NoOversellIntegrationTest`,
+  `BookingConfirmLoadIntegrationTest`, `HoldRedisUnavailableRaceIntegrationTest`) passed 2
+  consecutive runs; the behavioural classes (`BookingIntegrationTest`, `BookingServiceTest`,
+  `HoldServiceTest`, `HoldIntegrationTest`, 46 tests) passed. No deadlocks, lock-acquisition
+  exceptions, timeouts, or poll failures anywhere.
+- Files touched: `src/main/java/com/seatvault/seat_vault/service/HoldService.java`,
+  `.../service/BookingService.java`, `.../service/HoldSweepService.java`,
+  `src/test/java/com/seatvault/seat_vault/service/HoldLockOrderDeadlockIntegrationTest.java`
+  (new), `.../service/HoldReleaseSeatLockRaceIntegrationTest.java`, `.../service/BookingServiceTest.java`,
+  `src/test/java/com/seatvault/seat_vault/controller/BookingIntegrationTest.java`,
+  `docs/adr/0011-event-seats-is-locked-before-holds-everywhere.md` (new),
+  `docs/adr/0010-no-unlocked-entity-reads-before-a-row-lock.md` (amended)
+- No supplementary ADR written by docs-writer: ADR-0011 was already written by the implementer as
+  part of this task's diff, and ADR-0010 was amended in the same diff.

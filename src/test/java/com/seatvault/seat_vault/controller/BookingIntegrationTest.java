@@ -318,9 +318,15 @@ class BookingIntegrationTest {
      * of a race between "release this hold" and "convert this hold into a
      * booking" could blindly overwrite the winner's just-committed status
      * with its own stale one - e.g. a fully paid, CONVERTED hold silently
-     * reported back as EXPIRED. Both methods now lock the Hold row first
-     * ({@code HoldRepository#findByIdForUpdate}), so the loser here must
-     * re-read the committed status and reject cleanly instead. Deliberately
+     * reported back as EXPIRED. Both methods now lock the Hold row ({@code
+     * HoldRepository#findByIdForUpdate}), so the loser here must re-read the
+     * committed status and reject cleanly instead.
+     *
+     * <p>Since T-007 both take that lock <em>after</em> their seat locks
+     * rather than before, so the two calls serialize on the seat row first and
+     * on the Hold row second. Either row is enough to produce exactly one
+     * winner, which is all this test asserts - what changed is only where the
+     * loser waits. Deliberately
      * not {@code @Transactional} for the same reason as {@code
      * parallelConfirmCallsOnlyChargeOnce}: each racing call needs its own
      * real transaction contending for the same Hold row lock.
@@ -391,11 +397,11 @@ class BookingIntegrationTest {
     /**
      * Mirrors {@code HoldIntegrationTest#concurrentHoldRequestsForSameSeatOnlyOneWins}
      * for the booking-creation path: N concurrent {@code createFromHold}
-     * calls for the *same* hold must produce exactly one Booking. Since the
-     * Hold row is now locked before any seat is touched (see the regression
-     * test above), the losers are rejected at the top-level ACTIVE check
-     * rather than deep in the seat-locking loop - still exactly the "only one
-     * side effect" guarantee this test is here to pin down. Deliberately not
+     * calls for the *same* hold must produce exactly one Booking. The losers
+     * are rejected at the top-level ACTIVE check - after taking the seat locks
+     * (T-007's ordering) but before the per-seat loop - rather than deep
+     * inside it, which is still exactly the "only one side effect" guarantee
+     * this test is here to pin down. Deliberately not
      * {@code @Transactional} for the same reason as the other concurrency
      * tests in this class.
      */

@@ -36,7 +36,11 @@ import org.springframework.transaction.annotation.Transactional;
  * {@link HoldSeat#getPriceSnapshot()} is captured from {@link EventSeat#getPrice()}
  * right here and never re-read later. ADR-0010 is why neither
  * {@code createHold}'s pre-check nor {@code releaseHold}'s candidate lookup
- * may load an {@code EventSeat} entity before the locking loop runs.
+ * may load an {@code EventSeat} entity before the locking loop runs, and
+ * ADR-0011 is why both methods - and every other path in the codebase that
+ * touches both tables - take their {@code event_seats} locks before their
+ * {@code holds} lock, including the one {@code createHold} takes without
+ * looking like it does.
  */
 @Service
 @RequiredArgsConstructor
@@ -74,7 +78,11 @@ public class HoldService {
         // Seats are locked (both here in Redis and below via Postgres row
         // locks) in a fixed, globally-consistent order (ascending id) so that
         // two concurrent requests targeting overlapping seat sets can never
-        // deadlock waiting on each other in opposite orders.
+        // deadlock waiting on each other in opposite orders. That is only
+        // half the ordering rule: this method also locks the holds row of any
+        // hold it lazily expires, and it does so *after* the seat locks (see
+        // createHoldWithSeatsLocked). Seats before holds is the order every
+        // path in the codebase now keeps - ADR-0011.
         List<AcquiredLock> acquiredLocks = new ArrayList<>();
         try {
             for (Long seatId : seatIds) {
@@ -138,6 +146,17 @@ public class HoldService {
                 // seat is still stored as HELD means this is a lazily-expired
                 // hold (ADR-0002) - reconcile it in this same transaction
                 // before handing the seat to the new hold.
+                //
+                // THIS LINE TAKES A ROW LOCK, even though nothing about it
+                // looks like one: dirtying a managed entity makes Hibernate
+                // issue an UPDATE at flush time, and that UPDATE locks the
+                // holds row for the rest of this transaction (ADR-0011). It
+                // is the second half of this method's lock order - seats
+                // first, holds second - and it is why releaseHold and
+                // BookingService#createFromHold had to be inverted to match
+                // rather than this being moved out of the seat loop. Adding
+                // any read-then-write of a *third* table inside this loop
+                // needs the same care.
                 staleHold.setStatus(HoldStatus.EXPIRED);
             }
 
@@ -156,28 +175,36 @@ public class HoldService {
         return toResponse(hold, holdSeats);
     }
 
+    /**
+     * Lock order here is load-bearing and deliberately counter-intuitive:
+     * <b>every {@code event_seats} row first (ascending id), the {@code holds}
+     * row second</b> (ADR-0011). Authorizing the caller before doing any work
+     * would be the natural way to write this, and is how it was written until
+     * T-007 - but locking the {@code holds} row first made this the only
+     * method in the codebase that took these two tables in that order, and it
+     * deadlocked against {@code createHold} and {@code
+     * HoldSweepService#sweepExpiredHolds}, both of which take seats first.
+     * Postgres broke the cycle by killing one of the two, so a legitimate
+     * request got a 500. Pinned by {@code
+     * HoldLockOrderDeadlockIntegrationTest}.
+     *
+     * <p>Two consequences of the order that are accepted, not overlooked. The
+     * seat locks are taken before the caller is known to be the owner, so a
+     * request for someone else's hold briefly contends on that owner's seats
+     * before being rejected - the locks last microseconds and are rolled back,
+     * where a deadlocked release costs a user-visible error. And the hold's
+     * status is now read <em>after</em> the seats are pinned, so a concurrent
+     * {@code createHold} that lazily expired this hold (ADR-0002) can win the
+     * race and turn this call into a 409 that would previously have been a
+     * 204. That is the correct answer for a hold that really has expired
+     * (ADR-0007), not a regression.
+     */
     @Transactional
     public void releaseHold(Long userId, Long holdId) {
-        // Locked (not a plain findById) so this can't race with
-        // BookingService#createFromHold converting the same Hold: whichever
-        // of the two commits first, the other blocks here and then re-reads
-        // the committed status below, rather than blindly overwriting it.
-        Hold hold = holdRepository.findByIdForUpdate(holdId)
-                .filter(h -> h.getUser().getId().equals(userId))
-                // Same code whether the hold doesn't exist at all or belongs
-                // to someone else - don't let a non-owner distinguish the two.
-                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "HOLD_NOT_FOUND", "Hold not found."));
-
-        if (hold.getStatus() != HoldStatus.ACTIVE) {
-            throw new ApiException(HttpStatus.CONFLICT, "HOLD_NOT_ACTIVE", "Hold is not active.");
-        }
-
-        // This is an unlocked read, good enough to gather candidate seat ids,
-        // but the actual read-check-write must happen under each seat's own
-        // row lock (same as createHoldWithSeatsLocked) - otherwise a
-        // concurrent transaction that has already re-homed this seat onto a
-        // brand-new hold could be silently clobbered by this release. Sorted
-        // ascending for the same deadlock-avoidance reason as createHold.
+        // An unlocked read, good enough to gather candidate seat ids: the set
+        // can only shrink under us (nothing ever adds a seat to an existing
+        // hold), and each id is re-checked below under its own row lock.
+        // Sorted ascending, the same global seat order createHold uses.
         //
         // It must be a scalar id projection, never an entity query such as
         // the findByCurrentHoldId this used to call (ADR-0010): loading
@@ -193,11 +220,37 @@ public class HoldService {
                 .sorted()
                 .toList();
 
+        List<EventSeat> lockedSeats = new ArrayList<>(seatIds.size());
         for (Long seatId : seatIds) {
-            EventSeat eventSeat = eventSeatRepository.findByIdForUpdate(seatId)
+            lockedSeats.add(eventSeatRepository.findByIdForUpdate(seatId)
                     .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "EVENT_SEAT_NOT_FOUND",
-                            "Event seat " + seatId + " not found."));
+                            "Event seat " + seatId + " not found.")));
+        }
 
+        // Only now the holds row. Locked (not a plain findById) so this can't
+        // race with BookingService#createFromHold converting the same Hold:
+        // whichever of the two commits first, the other blocks here and then
+        // re-reads the committed status, rather than blindly overwriting it.
+        //
+        // Nothing above may have loaded this Hold as an initialized entity,
+        // or the identity map would serve this locked read from that pre-lock
+        // snapshot (ADR-0010). It hasn't: the projection materializes no
+        // entity, and EventSeat#currentHold is a lazy proxy that the loop
+        // above never touches.
+        Hold hold = holdRepository.findByIdForUpdate(holdId)
+                .filter(h -> h.getUser().getId().equals(userId))
+                // Same code whether the hold doesn't exist at all or belongs
+                // to someone else - don't let a non-owner distinguish the two.
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "HOLD_NOT_FOUND", "Hold not found."));
+
+        if (hold.getStatus() != HoldStatus.ACTIVE) {
+            throw new ApiException(HttpStatus.CONFLICT, "HOLD_NOT_ACTIVE", "Hold is not active.");
+        }
+
+        for (EventSeat eventSeat : lockedSeats) {
+            // getId() on the association reads the proxy's identifier without
+            // initializing it, so this guard still sees the locked row's
+            // current_hold_id rather than any earlier snapshot.
             Hold currentHold = eventSeat.getCurrentHold();
             if (currentHold != null && currentHold.getId().equals(holdId)) {
                 eventSeat.setStatus(EventSeatStatus.AVAILABLE);

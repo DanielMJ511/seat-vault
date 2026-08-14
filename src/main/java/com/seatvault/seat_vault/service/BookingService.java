@@ -42,6 +42,12 @@ import org.springframework.transaction.annotation.Transactional;
  * carried through unchanged from the HoldSeat snapshot, never re-read from
  * EventSeat). {@code confirmPayment} adds its own serialization point - a row
  * lock on the Booking itself - to make repeated confirm calls idempotent.
+ *
+ * <p>ADR-0011 governs the order those locks are taken in: {@code
+ * createFromHold} locks its seats before the hold, matching {@code
+ * HoldService}. The Booking row lock in {@code confirmPayment}/{@code cancel}
+ * sits ahead of both - bookings, then seats, then holds - which is consistent
+ * because nothing ever locks an existing Booking while already holding a seat.
  */
 @Service
 @RequiredArgsConstructor
@@ -55,11 +61,53 @@ public class BookingService {
     private final EventSeatRepository eventSeatRepository;
     private final PaymentService paymentService;
 
+    /**
+     * Same lock order as {@code HoldService#releaseHold}, and for the same
+     * reason: <b>every {@code event_seats} row first (ascending id), the
+     * {@code holds} row second</b> (ADR-0011). This method used to lock the
+     * hold first to authorize the caller, which put it on the opposite side of
+     * the ordering from {@code HoldService#createHold} and {@code
+     * HoldSweepService} - both of which lock a seat and then write that seat's
+     * (expired) hold. The interleaving is entirely reachable: a user clicking
+     * "book" on a hold that has just lazily expired, while someone else grabs
+     * the freed seat, is two ordinary requests, and Postgres resolves the
+     * resulting cycle by killing one of them with a 500.
+     *
+     * <p>Authorization is unchanged in substance - a hold that does not exist
+     * and a hold belonging to someone else still collapse into the same 404
+     * (ADR-0008), and a non-ACTIVE hold still gets 409 - it just happens after
+     * the seats are pinned rather than before, so a rejected request may
+     * briefly have held seat locks it then rolls back.
+     */
     @Transactional
     public BookingResponse createFromHold(Long userId, CreateBookingRequest request) {
-        // Locked (not a plain findById) so this can't race with
-        // HoldService#releaseHold on the same Hold: whichever of the two
-        // commits first, the other blocks here and re-reads the committed
+        // Gathered before any lock, and deliberately without reading the Hold
+        // itself: this is a query on hold_seats by hold id, and HoldSeat#hold
+        // is a lazy proxy that stays untouched, so nothing puts a pre-lock
+        // snapshot of the Hold into the persistence context ahead of the
+        // locked read below (ADR-0010). HoldSeat#eventSeat is likewise only
+        // asked for its identifier, which a proxy answers without loading.
+        // The set is immutable in practice - hold_seats rows are written once,
+        // when the hold is created, and never added to.
+        List<HoldSeat> holdSeats = holdSeatRepository.findByHoldId(request.holdId());
+        Map<Long, HoldSeat> holdSeatByEventSeatId = new HashMap<>();
+        for (HoldSeat holdSeat : holdSeats) {
+            holdSeatByEventSeatId.put(holdSeat.getEventSeat().getId(), holdSeat);
+        }
+        List<Long> seatIds = holdSeatByEventSeatId.keySet().stream().sorted().toList();
+
+        List<EventSeat> lockedSeats = new ArrayList<>(seatIds.size());
+        for (Long seatId : seatIds) {
+            // The actual correctness mechanism: a Postgres row lock, held
+            // until this transaction commits or rolls back.
+            lockedSeats.add(eventSeatRepository.findByIdForUpdate(seatId)
+                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "EVENT_SEAT_NOT_FOUND",
+                            "Event seat " + seatId + " not found.")));
+        }
+
+        // Only now the holds row. Locked (not a plain findById) so this can't
+        // race with HoldService#releaseHold on the same Hold: whichever of the
+        // two commits first, the other blocks here and re-reads the committed
         // status below, rather than a stale in-memory copy overwriting it.
         Hold hold = holdRepository.findByIdForUpdate(request.holdId())
                 .filter(h -> h.getUser().getId().equals(userId))
@@ -70,47 +118,46 @@ public class BookingService {
         if (hold.getStatus() != HoldStatus.ACTIVE) {
             throw new ApiException(HttpStatus.CONFLICT, "HOLD_NOT_ACTIVE", "Hold is not active.");
         }
-
-        List<HoldSeat> holdSeats = holdSeatRepository.findByHoldId(hold.getId());
-        if (holdSeats.isEmpty()) {
+        if (lockedSeats.isEmpty()) {
             // Shouldn't happen - HoldService#createHold never persists a Hold
             // without at least one HoldSeat - but an ACTIVE Hold with no
             // seats can't be converted into a meaningful Booking, so reject
-            // rather than silently producing a $0, zero-seat one.
+            // rather than silently producing a $0, zero-seat one. Checked
+            // after the two lookups above so an unknown or foreign hold id
+            // still answers 404 rather than leaking through as this 409.
             throw new ApiException(HttpStatus.CONFLICT, "HOLD_NOT_ACTIVE", "Hold has no seats.");
         }
-        Map<Long, HoldSeat> holdSeatByEventSeatId = new HashMap<>();
-        for (HoldSeat holdSeat : holdSeats) {
-            holdSeatByEventSeatId.put(holdSeat.getEventSeat().getId(), holdSeat);
-        }
-        List<Long> seatIds = holdSeatByEventSeatId.keySet().stream().sorted().toList();
 
-        List<BookingSeat> bookingSeats = new ArrayList<>(seatIds.size());
-        for (Long seatId : seatIds) {
-            // The actual correctness mechanism: a Postgres row lock, held
-            // until this transaction commits or rolls back.
-            EventSeat eventSeat = eventSeatRepository.findByIdForUpdate(seatId)
-                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "EVENT_SEAT_NOT_FOUND",
-                            "Event seat " + seatId + " not found."));
+        List<BookingSeat> bookingSeats = new ArrayList<>(lockedSeats.size());
+        for (EventSeat eventSeat : lockedSeats) {
+            // Checked before the availability check, and before anything
+            // initializes the association: getId() reads the proxy's
+            // identifier only. The invariant this defends is that a seat only
+            // ever leaves a hold in the same transaction that takes that hold
+            // out of ACTIVE, so an ACTIVE hold whose seat points elsewhere
+            // should be impossible - but the whole point of ADR-0010 is that
+            // the guard must be under the seat's own lock rather than assumed
+            // from an earlier read.
+            Hold seatHold = eventSeat.getCurrentHold();
+            if (seatHold == null || !seatHold.getId().equals(hold.getId())) {
+                throw new ApiException(HttpStatus.CONFLICT, "HOLD_NOT_ACTIVE", "Hold is not active.");
+            }
 
             EventSeatStatus effectiveStatus = EventSeatAvailability.effectiveStatus(eventSeat);
             if (effectiveStatus != EventSeatStatus.HELD) {
                 // AVAILABLE means this hold lazily expired since it was
                 // created (ADR-0002) - this transaction is rolling back, so
                 // there's no point reconciling Hold.status here, the
-                // sweep/lazy-check will catch it later. BOOKED should be
-                // unreachable now that the Hold row itself is locked above
-                // before this loop runs - any concurrent createFromHold call
-                // racing on the same Hold now serializes there, before
-                // either can touch a seat - but reject defensively rather
-                // than silently trusting that assumption.
+                // sweep/lazy-check will catch it later. BOOKED is unreachable
+                // via the guard above (a booked seat carries no currentHold),
+                // but reject defensively rather than silently trusting that.
                 throw new ApiException(HttpStatus.CONFLICT, "HOLD_NOT_ACTIVE", "Hold is not active.");
             }
 
             eventSeat.setStatus(EventSeatStatus.BOOKED);
             eventSeat.setCurrentHold(null);
 
-            HoldSeat holdSeat = holdSeatByEventSeatId.get(seatId);
+            HoldSeat holdSeat = holdSeatByEventSeatId.get(eventSeat.getId());
             bookingSeats.add(BookingSeat.builder()
                     .eventSeat(eventSeat)
                     .priceSnapshot(holdSeat.getPriceSnapshot())

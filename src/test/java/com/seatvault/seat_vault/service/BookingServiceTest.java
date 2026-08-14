@@ -76,6 +76,13 @@ class BookingServiceTest {
                 eventSeatRepository, paymentService);
     }
 
+    /**
+     * Also pins an ordering hazard T-007 introduced: seat ids are now gathered
+     * from {@code hold_seats} before the hold is read, and an unknown hold id
+     * makes that lookup come back empty. The answer must still be this 404
+     * (ADR-0008), not the "hold has no seats" 409 that an empty seat list
+     * would otherwise produce.
+     */
     @Test
     void createFromHoldWithMissingHoldIsNotFound() {
         BookingService service = newBookingService();
@@ -110,8 +117,17 @@ class BookingServiceTest {
                 });
     }
 
+    /**
+     * The hold's status is checked under its own row lock, but that lock is
+     * now taken <em>after</em> the seat locks, not before (T-007: locking the
+     * holds row first put this method on the opposite side of the codebase's
+     * lock ordering from {@code HoldService#createHold} and deadlocked against
+     * it). So a doomed request does pay for the seat locks before being
+     * rejected - asserted here rather than left to be discovered, since the
+     * previous version of this test pinned the opposite.
+     */
     @Test
-    void createFromHoldWithNonActiveHoldIsRejectedBeforeLocking() {
+    void createFromHoldWithNonActiveHoldIsRejectedAfterTheSeatsAreLocked() {
         BookingService service = newBookingService();
         Hold expiredHold = Hold.builder()
                 .id(11L)
@@ -121,6 +137,19 @@ class BookingServiceTest {
                 .build();
         when(holdRepository.findByIdForUpdate(11L)).thenReturn(Optional.of(expiredHold));
 
+        EventSeat seat = EventSeat.builder()
+                .id(12L)
+                .status(EventSeatStatus.HELD)
+                .price(new BigDecimal("50.00"))
+                .currentHold(expiredHold)
+                .build();
+        when(holdSeatRepository.findByHoldId(11L)).thenReturn(List.of(HoldSeat.builder()
+                .hold(expiredHold)
+                .eventSeat(seat)
+                .priceSnapshot(new BigDecimal("50.00"))
+                .build()));
+        when(eventSeatRepository.findByIdForUpdate(12L)).thenReturn(Optional.of(seat));
+
         assertThatThrownBy(() -> service.createFromHold(1L, new CreateBookingRequest(11L)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(ex -> {
@@ -129,7 +158,60 @@ class BookingServiceTest {
                     assertThat(apiException.getCode()).isEqualTo("HOLD_NOT_ACTIVE");
                 });
 
-        verify(eventSeatRepository, never()).findByIdForUpdate(anyLong());
+        verify(eventSeatRepository).findByIdForUpdate(12L);
+        verify(bookingRepository, never()).save(any());
+    }
+
+    /**
+     * The per-seat ownership guard T-007 added: a seat that an ACTIVE hold no
+     * longer owns must not be booked out from under whoever does own it. The
+     * invariant says this cannot happen (a seat only ever leaves a hold in the
+     * transaction that also takes that hold out of ACTIVE) - the guard exists
+     * because ADR-0010's whole point is that such a conclusion must be
+     * re-checked under the seat's own row lock, not inherited from an earlier
+     * read. Like the sibling test in {@code HoldServiceTest}, a mock cannot
+     * reproduce the identity-map half of that rule; it pins the branch only.
+     */
+    @Test
+    void createFromHoldDoesNotBookASeatThatNowBelongsToADifferentHold() {
+        BookingService service = newBookingService();
+        Hold ownedHold = Hold.builder()
+                .id(32L)
+                .user(User.builder().id(1L).build())
+                .status(HoldStatus.ACTIVE)
+                .expiresAt(Instant.now().plusSeconds(300))
+                .build();
+        when(holdRepository.findByIdForUpdate(32L)).thenReturn(Optional.of(ownedHold));
+
+        Hold otherHold = Hold.builder()
+                .id(33L)
+                .status(HoldStatus.ACTIVE)
+                .expiresAt(Instant.now().plusSeconds(300))
+                .build();
+        EventSeat seat = EventSeat.builder()
+                .id(13L)
+                .status(EventSeatStatus.HELD)
+                .price(new BigDecimal("50.00"))
+                .currentHold(otherHold)
+                .build();
+        when(holdSeatRepository.findByHoldId(32L)).thenReturn(List.of(HoldSeat.builder()
+                .hold(ownedHold)
+                .eventSeat(seat)
+                .priceSnapshot(new BigDecimal("50.00"))
+                .build()));
+        when(eventSeatRepository.findByIdForUpdate(13L)).thenReturn(Optional.of(seat));
+
+        assertThatThrownBy(() -> service.createFromHold(1L, new CreateBookingRequest(32L)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException apiException = (ApiException) ex;
+                    assertThat(apiException.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(apiException.getCode()).isEqualTo("HOLD_NOT_ACTIVE");
+                });
+
+        assertThat(seat.getStatus()).isEqualTo(EventSeatStatus.HELD);
+        assertThat(seat.getCurrentHold()).isEqualTo(otherHold);
+        verify(bookingRepository, never()).save(any());
     }
 
     @Test

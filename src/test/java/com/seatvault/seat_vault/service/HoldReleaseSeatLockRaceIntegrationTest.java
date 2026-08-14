@@ -68,28 +68,44 @@ import org.springframework.transaction.support.TransactionTemplate;
  * transaction runs on the test thread and takes the seat's row lock with its
  * first statement, so the releasing thread is guaranteed to park at {@code
  * findByIdForUpdate} — after its unlocked candidate read, before its guard.
- * The test waits for that park to be observable in {@code pg_locks} (and
- * asserts the release really has not finished) before the thief commits, so
- * there is no sleep-and-hope window in which the release could slip through
- * and produce a false pass.
+ * The test waits for that park to be observable in {@code pg_locks}, scoped
+ * to the releasing thread's own backend pid (see {@link
+ * #awaitReleaseBlockedOnTheSeatRow}), and asserts the release really has not
+ * finished before the thief commits, so there is no sleep-and-hope window in
+ * which the release could slip through and produce a false pass.
  *
- * <p><b>What the thief models, and one thing it deliberately does not.</b>
- * The thief frees the seat with {@link
+ * <p><b>The thief transaction is manufactured, and says so.</b> It is not a
+ * replay of a production sequence: it frees the seat with {@link
  * EventSeatRepository#releaseExpiredHeldSeats} — the sweep's own statement,
  * which touches {@code event_seats} only — and then creates a genuine new
- * hold through {@link HoldService#createHold}. It does <em>not</em> reach the
- * seat through {@code createHold}'s lazy-expiry reconciliation of the
- * <em>outgoing</em> hold (ADR-0002), because that path writes the outgoing
- * {@code holds} row, which {@code releaseHold} has locked for its whole
- * transaction ({@code HoldService.java:163}) — so it cannot commit
- * underneath a release; it can only queue behind it. That hold-row lock is
- * what keeps this defect latent in today's arrangement rather than routinely
- * exploitable, and it is not something to rely on: it is one lock in one
- * method away from being false, the guard it accidentally protects is dead
- * code as long as it holds, and any new path that re-homes a seat without
- * writing its hold's row (a sweep split for throughput, an admin seat move,
- * a hold merge) makes the clobber live with no other code change. Hence
- * ADR-0010 as a discipline, and hence this test.
+ * hold through {@link HoldService#createHold}, deliberately splitting apart
+ * two things no single production path does in that combination, and
+ * bypassing {@code HoldSweepService} rather than waiting for it. What it
+ * models is the <em>shape</em> of a competitor: some other transaction
+ * re-homes this seat onto a different hold and commits, between the moment
+ * {@code releaseHold} reads its candidate list and the moment it takes the
+ * seat's row lock. This test is a forward-looking guard on ADR-0010's
+ * discipline, held to the standard ADR-0010 sets for itself when it calls the
+ * masking "an accident of the current call graph, not a guarantee."
+ *
+ * <p><b>Why it has to be manufactured.</b> The natural competitor is {@code
+ * createHold}'s lazy-expiry reconciliation of the <em>outgoing</em> hold
+ * (ADR-0002). Until T-007 it could not be used at all: {@code releaseHold}
+ * locked the {@code holds} row first and held it for its whole transaction,
+ * so that path could not commit underneath a release, it deadlocked with it
+ * — which is the bug T-007 then fixed by inverting the order. It still
+ * cannot be used, for a different and less alarming reason: reconciling the
+ * outgoing hold sets it {@code EXPIRED}, so a release arriving afterwards
+ * stops at its {@code HOLD_NOT_ACTIVE} check (which now runs after the seat
+ * locks) and never reaches the per-seat ownership guard this test exists to
+ * exercise. Freeing the seat without touching its hold's row is the only way
+ * to drive the release all the way into that guard.
+ *
+ * <p><b>What T-007 changed here.</b> {@code releaseHold} no longer pins the
+ * {@code holds} row for the duration, so the guard is no longer dead code
+ * that a lock happens to protect — a competitor can now genuinely commit a
+ * re-homing while a release is parked on an earlier seat, exactly as this
+ * test stages. The ADR-0010 projection is what makes the guard see it.
  */
 @SpringBootTest
 @Import(TestcontainersConfig.class)
@@ -177,6 +193,7 @@ class HoldReleaseSeatLockRaceIntegrationTest {
         AtomicReference<Future<?>> release = new AtomicReference<>();
         AtomicReference<Throwable> releaseFailure = new AtomicReference<>();
         AtomicBoolean releaseFinished = new AtomicBoolean();
+        AtomicLong releasePid = new AtomicLong();
         AtomicLong thiefHoldId = new AtomicLong();
         ExecutorService executor = Executors.newSingleThreadExecutor();
 
@@ -188,7 +205,17 @@ class HoldReleaseSeatLockRaceIntegrationTest {
 
                 release.set(executor.submit(() -> {
                     try {
-                        holdService.releaseHold(ownerId, ownerHoldId);
+                        transactionTemplate.executeWithoutResult(releaseStatus -> {
+                            // Published before any locking so the poll below
+                            // can be scoped to this exact backend. Wrapping
+                            // the call in a template rather than letting its
+                            // own @Transactional start the transaction is the
+                            // only way to learn the backend pid from outside;
+                            // propagation is REQUIRED, so releaseHold joins
+                            // this transaction and behaves identically.
+                            releasePid.set(jdbcTemplate.queryForObject("select pg_backend_pid()", Long.class));
+                            holdService.releaseHold(ownerId, ownerHoldId);
+                        });
                     } catch (Throwable t) {
                         releaseFailure.set(t);
                     } finally {
@@ -196,7 +223,7 @@ class HoldReleaseSeatLockRaceIntegrationTest {
                     }
                 }));
 
-                awaitBlockedOnARowLock();
+                awaitReleaseBlockedOnTheSeatRow(releasePid);
                 assertThat(releaseFinished)
                         .as("the release must still be parked on the seat row lock, not already committed")
                         .isFalse();
@@ -229,22 +256,48 @@ class HoldReleaseSeatLockRaceIntegrationTest {
     }
 
     /**
-     * Waits until some session is genuinely waiting on a lock. The only
-     * contended lock in play is the seat row the enclosing transaction holds,
-     * and the only other session is the releasing thread, so an ungranted
-     * lock here means that thread is parked inside {@code findByIdForUpdate}
-     * - past its unlocked candidate read, short of its ownership guard, which
-     * is precisely the window under test. Fails loudly rather than proceeding
-     * on a timeout: a release that never parked would sail through and turn
-     * this into a test that passes for the wrong reason.
+     * Waits until the releasing thread is parked on an {@code event_seats} row
+     * lock - i.e. inside {@code findByIdForUpdate}, past its unlocked
+     * candidate read and short of its ownership guard, which is precisely the
+     * window under test. Fails loudly rather than proceeding on a timeout: a
+     * release that never parked would sail through and turn this into a test
+     * that passes for the wrong reason.
+     *
+     * <p>Scoped to that thread's own backend pid, and to the table. It used to
+     * be an unscoped {@code select count(*) from pg_locks where not granted},
+     * which a code review flagged: {@code HoldSweepService} runs every 30
+     * seconds, {@code @EnableScheduling} is not gated by profile, Spring's
+     * context cache keeps that scheduler alive for the whole suite, and this
+     * test deliberately creates exactly the expired-hold rows the sweep hunts
+     * for. A sweep blocked on the very seat row the enclosing transaction
+     * holds would have satisfied the unscoped poll and released the thief
+     * early - a false pass, and a contradiction of this test's claim to have
+     * no sleep-and-hope window.
+     *
+     * <p>The join looks indirect because of how Postgres represents a row-lock
+     * wait: the ungranted entry is a {@code ShareLock} on the holder's {@code
+     * transactionid} and carries no relation at all, so the relation has to be
+     * read off the {@code tuple} lock the waiter holds while waiting.
+     * (Observed against Postgres before being written, not guessed.)
      */
-    private void awaitBlockedOnARowLock() {
+    private void awaitReleaseBlockedOnTheSeatRow(AtomicLong releasePid) {
         Instant deadline = Instant.now().plus(BLOCK_TIMEOUT);
         while (Instant.now().isBefore(deadline)) {
-            Integer waiting = jdbcTemplate.queryForObject(
-                    "select count(*) from pg_locks where not granted", Integer.class);
-            if (waiting != null && waiting > 0) {
-                return;
+            long backend = releasePid.get();
+            if (backend != 0) {
+                Integer waiting = jdbcTemplate.queryForObject("""
+                        select count(*)
+                        from pg_locks waiting
+                        join pg_locks tuple_lock
+                          on tuple_lock.pid = waiting.pid
+                         and tuple_lock.locktype = 'tuple'
+                         and tuple_lock.relation = 'event_seats'::regclass
+                        where waiting.pid = ?
+                          and not waiting.granted
+                        """, Integer.class, backend);
+                if (waiting != null && waiting > 0) {
+                    return;
+                }
             }
             try {
                 Thread.sleep(25);
@@ -253,9 +306,9 @@ class HoldReleaseSeatLockRaceIntegrationTest {
                 throw new IllegalStateException(e);
             }
         }
-        throw new AssertionError(
-                "No session blocked on a row lock within " + BLOCK_TIMEOUT + "; the release never reached "
-                        + "findByIdForUpdate while the seat row was held, so this run proves nothing.");
+        throw new AssertionError("The releasing thread (backend pid " + releasePid.get() + ") was not blocked on an "
+                + "event_seats row lock within " + BLOCK_TIMEOUT + "; it never reached findByIdForUpdate while the "
+                + "seat row was held, so this run proves nothing.");
     }
 
     private long userId(String email) {
