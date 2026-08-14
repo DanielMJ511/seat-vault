@@ -36,6 +36,24 @@ public interface EventSeatRepository extends JpaRepository<EventSeat, Long> {
     List<EventSeat> findByCurrentHoldId(Long holdId);
 
     /**
+     * Projects only the distinct {@code event_id}s for a set of seat ids,
+     * deliberately never materializing full {@code EventSeat} entities into
+     * the caller's persistence context. {@link HoldService#spansMultipleEvents}
+     * needs this as a cheap, pre-locking request-shape check; a plain {@code
+     * findAllById} would work too, but would load managed {@code EventSeat}
+     * entities (with their status as of that unlocked read) into the same
+     * transaction's Hibernate session <em>before</em> the real locking loop
+     * begins. Hibernate's identity map then reuses that already-managed,
+     * stale instance for the later, correctly-locked {@code
+     * findByIdForUpdate} call on the same id, instead of refreshing it from
+     * the fresh, lock-protected row - silently defeating the lock under real
+     * concurrent contention. See {@code HoldRedisUnavailableRaceIntegrationTest}
+     * (T-003) for the race that caught this.
+     */
+    @Query("select distinct es.event.id from EventSeat es where es.id in :ids")
+    List<Long> findDistinctEventIdsByIdIn(@Param("ids") List<Long> ids);
+
+    /**
      * UX-only bulk reconciliation used by {@code HoldSweepService}; the lazy
      * check-on-read in {@code HoldService}/{@code EventSeatAvailability} is
      * what's actually authoritative (ADR-0002).

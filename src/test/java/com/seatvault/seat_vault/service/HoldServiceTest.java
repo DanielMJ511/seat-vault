@@ -12,7 +12,6 @@ import static org.mockito.Mockito.when;
 
 import com.seatvault.seat_vault.config.HoldProperties;
 import com.seatvault.seat_vault.dto.HoldRequest;
-import com.seatvault.seat_vault.entity.Event;
 import com.seatvault.seat_vault.entity.EventSeat;
 import com.seatvault.seat_vault.entity.EventSeatStatus;
 import com.seatvault.seat_vault.entity.Hold;
@@ -100,11 +99,7 @@ class HoldServiceTest {
     void createHoldSpanningMultipleEventsIsRejected() {
         HoldService service = newHoldService();
 
-        Event eventOne = Event.builder().id(1L).build();
-        Event eventTwo = Event.builder().id(2L).build();
-        EventSeat seatInEventOne = EventSeat.builder().id(1L).event(eventOne).build();
-        EventSeat seatInEventTwo = EventSeat.builder().id(2L).event(eventTwo).build();
-        when(eventSeatRepository.findAllById(List.of(1L, 2L))).thenReturn(List.of(seatInEventOne, seatInEventTwo));
+        when(eventSeatRepository.findDistinctEventIdsByIdIn(List.of(1L, 2L))).thenReturn(List.of(1L, 2L));
 
         assertThatThrownBy(() -> service.createHold(1L, new HoldRequest(List.of(1L, 2L))))
                 .isInstanceOf(ApiException.class)

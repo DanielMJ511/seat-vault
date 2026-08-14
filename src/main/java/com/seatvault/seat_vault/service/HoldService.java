@@ -210,15 +210,30 @@ public class HoldService {
      * before any locking keeps a malformed request cheap to reject. Missing
      * seat ids are silently skipped here - they're reported precisely as
      * {@code EVENT_SEAT_NOT_FOUND} later, once locking has begun.
+     *
+     * <p>Deliberately a projection ({@link
+     * EventSeatRepository#findDistinctEventIdsByIdIn}), not {@code
+     * findAllById}: the latter would load full, managed {@code EventSeat}
+     * entities - with whatever status they had at this unlocked read - into
+     * this transaction's Hibernate persistence context before the real
+     * locking loop below even starts. Because a JPA session's identity map
+     * returns the same already-managed instance for a given id rather than
+     * refreshing it, the later, correctly-locked {@code findByIdForUpdate}
+     * call for that same seat would silently hand back this stale,
+     * unlocked-read snapshot instead of the fresh, lock-protected row -
+     * defeating the Postgres lock entirely for any request that overlaps
+     * with another. This was a real, confirmed bug (not hypothetical):
+     * {@code HoldRedisUnavailableRaceIntegrationTest}'s overlapping-seat race
+     * (T-003) reproducibly double-booked seats with the {@code findAllById}
+     * version whenever a request covered 2+ seats. A pure id/event-id
+     * projection never enters the persistence context at all, so it cannot
+     * poison the later locked read.
      */
     private boolean spansMultipleEvents(List<Long> seatIds) {
         if (seatIds.size() < 2) {
             return false;
         }
-        return eventSeatRepository.findAllById(seatIds).stream()
-                .map(eventSeat -> eventSeat.getEvent().getId())
-                .distinct()
-                .count() > 1;
+        return eventSeatRepository.findDistinctEventIdsByIdIn(seatIds).size() > 1;
     }
 
     private static HoldResponse toResponse(Hold hold, List<HoldSeat> holdSeats) {

@@ -66,3 +66,60 @@ Never edit past entries; only append. Spans all milestones.
 - Test result: full `./mvnw test` green — 84 tests (82 existing + 2 new), 0 failures, 0 errors, 0 skipped, 40.7s. Three independent standalone repeat runs of the new class passed (~18s each), plus 3 by the builder. No `invocationCount` cross-test pollution observed in either the full-suite run or standalone runs.
 - Files touched: `src/test/java/com/seatvault/seat_vault/controller/BookingConfirmLoadIntegrationTest.java` (new)
 - No supplementary ADR: pure test coverage following patterns already established by T-001 and the existing concurrency tests. No new architectural decision surfaced.
+
+## 2026-08-14 — T-003 Redis-unavailable fallback proving DB-only locking still holds
+- Agents involved: builder (1 pass), test-runner, code-reviewer (1 pass). No escalation to implementer for T-003 itself.
+- **This task found and fixed a real production double-booking bug.** T-003's Race 2 (8 seats,
+  12 threads, overlapping 3-seat requests, Redis down) is the suite's first configuration where
+  multiple threads are genuinely simultaneously inside `HoldService`'s Postgres locking loop for
+  overlapping seats — with Redis up, `SETNX` filters contention to one thread before Postgres is
+  reached. That race reproducibly double-booked seats: two threads with overlapping requests both
+  received 201.
+- Root cause: `spansMultipleEvents` called `eventSeatRepository.findAllById(seatIds)`, an unlocked
+  read that loads fully-managed `EventSeat` entities into the transaction's Hibernate persistence
+  context before the locking loop runs. Hibernate's identity map then returns that already-managed,
+  stale instance for the later `findByIdForUpdate` on the same id rather than refreshing from the
+  freshly-locked row — the Postgres `SELECT ... FOR UPDATE` genuinely acquired the row lock, but the
+  application read data from before it, defeating the lock for any request covering 2+ seats.
+  Undetected until now because `spansMultipleEvents` returns early for single-seat requests, and no
+  prior test combined multi-seat with Redis-down.
+- Fix: builder root-caused it empirically (confirmed `entityManager.clear()` before the locking loop
+  also fixed it) then applied the proper fix — a new `EventSeatRepository.findDistinctEventIdsByIdIn`
+  scalar projection that never materializes an `EventSeat` entity, so it cannot poison the later
+  locked read. Both the repository method and call site carry Javadoc naming the race that caught it.
+- What else was built: `RedisLockServiceTest` (7 Mockito unit tests covering fail-fast contention,
+  fail-open sentinel on `DataAccessException`, and `unlock` behavior on both the sentinel and a real
+  token), `BrokenRedisTestConfig` (`@TestConfiguration` Lettuce factory on a dead port with fast
+  timeouts and `autoReconnect(false)`), `HoldRedisUnavailableRaceIntegrationTest` (own isolated Spring
+  context/Postgres container via `PostgresTestcontainersConfig` + `BrokenRedisTestConfig`; wiring
+  sanity check, uncontended-hold smoke test, Race 1 single-seat/20-thread, a minimal 2-thread
+  regression repro, and Race 2), and a mechanical stub update in `HoldServiceTest`.
+- Code review verdict: CHANGES REQUESTED — but explicitly not against T-003's own diff, which the
+  reviewer confirmed correct and ready to ship as-is (fix shape verified better than the
+  alternatives; projection logic verified equivalent to the old distinct-count check including edge
+  cases; new test infrastructure sound; Race 2 verified via an `AtomicInteger` in-flight high-water
+  mark to genuinely establish concurrent Postgres entry rather than assuming it). The CHANGES
+  REQUESTED was raised for a critical pre-existing defect the review surfaced by pattern-matching
+  against the fix: the identical stale-entity pattern is still live in `HoldService.releaseHold`
+  (`findByCurrentHoldId` returning managed entities before the locked read), exploitable without any
+  Redis outage — confirmed able to silently destroy a valid concurrent hold. Because that code is not
+  part of T-003's diff, T-003 was committed on its own merits and the defect was tracked as new task
+  **T-006** (already added to `loop/PLAN.md`), escalated directly to `implementer`. Review also
+  confirmed two other sites (`BookingService.createFromHold`, `releaseBookingSeats`) are NOT
+  exploitable — both reach `EventSeat` only via lazy `@ManyToOne` proxies, never a materialized stale
+  instance.
+- **ADR note:** ADR-0010 is required but is deliberately assigned to T-006, not written here — T-006
+  fixes the second instance of the same bug (`releaseHold`) and will record the discipline covering
+  both sites ("never materialize a managed entity from an unlocked read, in the same transaction, for
+  an id later read under `findByIdForUpdate`") in one place rather than splitting it across two ADRs.
+- Test result: full `./mvnw test` green — 96 tests, 0 failures, 0 errors, 0 skipped, 50.1s (up from
+  84 tests / 40.7s). Three independent standalone repeat runs each of
+  `HoldRedisUnavailableRaceIntegrationTest` (~17.5s) and `RedisLockServiceTest` (~1.7s) all passed.
+  Pre-existing `HoldServiceTest` (11) and `HoldIntegrationTest` (8) confirmed green — no regression
+  from the production fix.
+- Files touched: `src/main/java/com/seatvault/seat_vault/repository/EventSeatRepository.java`,
+  `src/main/java/com/seatvault/seat_vault/service/HoldService.java`,
+  `src/test/java/com/seatvault/seat_vault/service/HoldServiceTest.java`,
+  `src/test/java/com/seatvault/seat_vault/service/RedisLockServiceTest.java` (new),
+  `src/test/java/com/seatvault/seat_vault/config/BrokenRedisTestConfig.java` (new),
+  `src/test/java/com/seatvault/seat_vault/controller/HoldRedisUnavailableRaceIntegrationTest.java` (new)
