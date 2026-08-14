@@ -96,10 +96,11 @@ import org.springframework.transaction.support.TransactionTemplate;
  * — which is the bug T-007 then fixed by inverting the order. It still
  * cannot be used, for a different and less alarming reason: reconciling the
  * outgoing hold sets it {@code EXPIRED}, so a release arriving afterwards
- * stops at its {@code HOLD_NOT_ACTIVE} check (which now runs after the seat
- * locks) and never reaches the per-seat ownership guard this test exists to
- * exercise. Freeing the seat without touching its hold's row is the only way
- * to drive the release all the way into that guard.
+ * stops at its status-not-ACTIVE check (which now runs after the seat locks,
+ * and reports {@code HOLD_EXPIRED} per ADR-0009's domain-state-keyed split -
+ * see {@link HoldExpiry}) and never reaches the per-seat ownership guard this
+ * test exists to exercise. Freeing the seat without touching its hold's row
+ * is the only way to drive the release all the way into that guard.
  *
  * <p><b>What T-007 changed here.</b> {@code releaseHold} no longer pins the
  * {@code holds} row for the duration, so the guard is no longer dead code

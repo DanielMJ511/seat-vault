@@ -259,11 +259,13 @@ class HoldLockOrderDeadlockIntegrationTest {
         // the create reconciled the expired hold first, so by the time the
         // release read the holds row under its own lock, the hold was already
         // EXPIRED. That is the correct answer to "release a hold that has
-        // already expired" (ADR-0007), not an error path.
+        // already expired" (ADR-0007), not an error path - and per ADR-0009's
+        // HOLD_EXPIRED/HOLD_NOT_ACTIVE split, a stored-EXPIRED hold reports
+        // HOLD_EXPIRED, not HOLD_NOT_ACTIVE (which narrows to CONVERTED holds).
         if (releaseFailure.get() != null) {
             ApiException failure = (ApiException) releaseFailure.get();
             assertThat(failure.getStatus()).isEqualTo(HttpStatus.CONFLICT);
-            assertThat(failure.getCode()).isEqualTo("HOLD_NOT_ACTIVE");
+            assertThat(failure.getCode()).isEqualTo("HOLD_EXPIRED");
         }
     }
 

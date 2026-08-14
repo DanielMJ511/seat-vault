@@ -302,3 +302,74 @@ Never edit past entries; only append. Spans all milestones.
   `docs/adr/0010-no-unlocked-entity-reads-before-a-row-lock.md` (amended)
 - No supplementary ADR written by docs-writer: ADR-0011 was already written by the implementer as
   part of this task's diff, and ADR-0010 was amended in the same diff.
+
+## 2026-08-14 — T-004 ErrorCode enum catalogue and HOLD_EXPIRED semantics (implements ADR-0009)
+- Agents involved: builder (1 pass, no respin), test-runner, code-reviewer (1 pass, APPROVED).
+- What was built: `exception/ErrorCode.java`, a closed enum carrying each code's `HttpStatus` and
+  description, with both raw-string `ApiException` constructors removed so there is no bypass —
+  every throw site across `AuthService`, `VenueService`, `EventService`, `EventSeatService`,
+  `HoldService`, `BookingService`, `GlobalExceptionHandler`, and `SecurityConfig`'s two inline
+  handlers (`UNAUTHENTICATED`, `ACCESS_DENIED`) now sources its code from the enum. New
+  `service/HoldExpiry.java` is a static sibling of `EventSeatAvailability` (private constructor,
+  pure function, deliberately not a Spring bean): `isExpired(Hold)` is true when the stored status
+  is `EXPIRED`, or `ACTIVE` with `expiresAt` in the past. No drift test was added — per ADR-0009, a
+  closed enum with no raw-string constructor makes the compiler enforce structurally what such a
+  test would assert.
+- Catalogue count corrected to 22, not the 21 the task packet (and grilling) claimed: the builder
+  re-derived it rather than trusting the packet and found the packet's arithmetic omitted
+  `HOLD_EXPIRED` itself (21 pre-existing + `HOLD_EXPIRED` = 22, verified directly against the enum
+  source). Code review independently reported 21, which was its own miscount; the review's
+  substantive checks — zero remaining `ApiException(HttpStatus` call sites, and every code's HTTP
+  status matching its pre-refactor value with no silent regression — were verified and are what
+  the APPROVED verdict actually rests on.
+- The `HOLD_EXPIRED` split is keyed on domain state, not throw site, per ADR-0009 — verified by
+  review at all five sites, so a client sees the same code whether `HoldSweepService` already
+  flipped the row to `EXPIRED` or it is still stored `ACTIVE` with `expiresAt` past.
+- T-007's per-seat ownership guard (the fifth, genuinely ambiguous site the packet flagged for a
+  deliberate decision) was also keyed on `HoldExpiry.isExpired(hold)`: `HOLD_EXPIRED` when the hold
+  has actually timed out, falling back to `HOLD_NOT_ACTIVE` for the guard's own "impossible"
+  invariant-violation case, reasoned in a comment at the throw site. Corroborated by
+  `createFromHoldDoesNotBookASeatThatNowBelongsToADifferentHold` passing unchanged (its fixture's
+  hold expires 300s in the future, correctly still `HOLD_NOT_ACTIVE`).
+- Deliberately not routed through `HoldExpiry`: `HoldService`'s lazy-reconciliation idempotency
+  gate (`staleHold.getStatus() == ACTIVE`) — builder argued, and review accepted, this asks "has
+  something already reconciled this Hold?" rather than repeating the time comparison that already
+  happened in `EventSeatAvailability.effectiveStatus`, so routing it through the helper would
+  dress up a different question as the same one. Recorded as an inline comment.
+- Five test assertions changed, each traced to the fixture's actual domain state and confirmed by
+  review as warranted rather than flipped to match the implementation:
+  `BookingIntegrationTest#createBookingFromLazilyExpiredHoldIsRejected`,
+  `BookingServiceTest#createFromHoldWithNonActiveHoldIsRejectedAfterTheSeatsAreLocked`,
+  `BookingServiceTest#createFromHoldRejectsWhenHoldHasLazilyExpiredSinceCreation`,
+  `HoldServiceTest#releaseAlreadyNonActiveHoldIsRejected`, and
+  `HoldLockOrderDeadlockIntegrationTest#releaseRacingCreateOnTheSameHoldMustNotDeadlock` (the
+  losing release reads a hold the create's lazy-expiry reconciliation already flipped to
+  `EXPIRED`) — all now `HOLD_EXPIRED`. Verified unchanged, deliberately:
+  `createFromHoldDoesNotBookASeatThatNowBelongsToADifferentHold`, `createFromHoldWithNoHoldSeatsIsRejected`,
+  and `BookingConfirmLoadIntegrationTest#sharedHoldRaceProducesOneBookingAndOneCharge` (races a
+  fresh, non-expired hold whose losers see `CONVERTED`) all correctly keep `HOLD_NOT_ACTIVE`.
+  `HoldReleaseSeatLockRaceIntegrationTest` had no code assertion, only a doc comment referencing
+  the old name, updated for accuracy.
+- Wire contract unchanged: `ErrorResponse.code` remains a plain `String`; `GlobalExceptionHandler`
+  still threads `ex.getCode()`/`ex.getStatus()` unchanged. Internal refactor only, JSON shape did
+  not change.
+- Test result: full `./mvnw test` green — 99 tests, 0 failures, 0 errors, 0 skipped, 54.7s
+  (unchanged count; this task adds no tests by design). The two touched concurrency classes passed
+  2 consecutive standalone runs each. All 56 tests carrying `$.code` assertions
+  (`BookingIntegrationTest`, `BookingServiceTest`, `HoldServiceTest`, `HoldIntegrationTest`,
+  `AuthIntegrationTest`) passed with no error-code assertion failures.
+- Code review verdict: APPROVED, no critical or major findings. No scope creep — touched files
+  match the packet's list plus the two new files it anticipated.
+- Files touched: new — `exception/ErrorCode.java`, `service/HoldExpiry.java`. Modified —
+  `exception/ApiException.java`, `exception/GlobalExceptionHandler.java`,
+  `config/SecurityConfig.java`, `service/AuthService.java`, `service/EventSeatService.java`,
+  `service/EventService.java`, `service/VenueService.java`, `service/HoldService.java`,
+  `service/BookingService.java`, plus tests `controller/BookingIntegrationTest.java`,
+  `service/BookingServiceTest.java`, `service/HoldServiceTest.java`,
+  `service/HoldLockOrderDeadlockIntegrationTest.java`,
+  `service/HoldReleaseSeatLockRaceIntegrationTest.java`.
+- No supplementary ADR: ADR-0009 already governs this task, written during M7's grilling session
+  before implementation started. This task is its implementation; nothing new was decided.
+- Note for T-005: `ErrorCode`'s description field is the source the OpenAPI `@ApiResponse`
+  examples must draw from, per ADR-0009 — the generated document is the consumer-facing catalogue,
+  and there is deliberately no hand-maintained Markdown table.

@@ -1,6 +1,7 @@
 package com.seatvault.seat_vault.config;
 
 import com.seatvault.seat_vault.dto.ErrorResponse;
+import com.seatvault.seat_vault.exception.ErrorCode;
 import com.seatvault.seat_vault.security.JwtAuthenticationFilter;
 import jakarta.servlet.http.HttpServletResponse;
 import java.time.Instant;
@@ -8,7 +9,6 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
@@ -76,9 +76,9 @@ public class SecurityConfig {
         return (request, response, authException) -> {
             ErrorResponse body = new ErrorResponse(
                     Instant.now(),
-                    HttpStatus.UNAUTHORIZED.value(),
-                    "UNAUTHENTICATED",
-                    "Authentication is required to access this resource.",
+                    ErrorCode.UNAUTHENTICATED.getStatus().value(),
+                    ErrorCode.UNAUTHENTICATED.name(),
+                    ErrorCode.UNAUTHENTICATED.getDescription(),
                     request.getRequestURI());
 
             response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
@@ -100,9 +100,9 @@ public class SecurityConfig {
         return (request, response, accessDeniedException) -> {
             ErrorResponse body = new ErrorResponse(
                     Instant.now(),
-                    HttpStatus.FORBIDDEN.value(),
-                    "ACCESS_DENIED",
-                    "You do not have permission to access this resource.",
+                    ErrorCode.ACCESS_DENIED.getStatus().value(),
+                    ErrorCode.ACCESS_DENIED.name(),
+                    ErrorCode.ACCESS_DENIED.getDescription(),
                     request.getRequestURI());
 
             response.setStatus(HttpServletResponse.SC_FORBIDDEN);

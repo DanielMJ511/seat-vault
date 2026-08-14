@@ -4,7 +4,6 @@ import com.seatvault.seat_vault.dto.ErrorResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -44,12 +43,12 @@ public class GlobalExceptionHandler {
 
         ErrorResponse body = new ErrorResponse(
                 Instant.now(),
-                HttpStatus.BAD_REQUEST.value(),
-                "VALIDATION_ERROR",
+                ErrorCode.VALIDATION_ERROR.getStatus().value(),
+                ErrorCode.VALIDATION_ERROR.name(),
                 message,
                 request.getRequestURI()
         );
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(body);
+        return ResponseEntity.status(ErrorCode.VALIDATION_ERROR.getStatus()).body(body);
     }
 
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
@@ -60,12 +59,12 @@ public class GlobalExceptionHandler {
 
         ErrorResponse body = new ErrorResponse(
                 Instant.now(),
-                HttpStatus.BAD_REQUEST.value(),
-                "INVALID_PARAMETER",
+                ErrorCode.INVALID_PARAMETER.getStatus().value(),
+                ErrorCode.INVALID_PARAMETER.name(),
                 message,
                 request.getRequestURI()
         );
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(body);
+        return ResponseEntity.status(ErrorCode.INVALID_PARAMETER.getStatus()).body(body);
     }
 
     @ExceptionHandler(Exception.class)
@@ -73,11 +72,11 @@ public class GlobalExceptionHandler {
         log.error("Unhandled exception while processing request [{}]", request.getRequestURI(), ex);
         ErrorResponse body = new ErrorResponse(
                 Instant.now(),
-                HttpStatus.INTERNAL_SERVER_ERROR.value(),
-                "INTERNAL_SERVER_ERROR",
-                "An unexpected error occurred.",
+                ErrorCode.INTERNAL_SERVER_ERROR.getStatus().value(),
+                ErrorCode.INTERNAL_SERVER_ERROR.name(),
+                ErrorCode.INTERNAL_SERVER_ERROR.getDescription(),
                 request.getRequestURI()
         );
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(body);
+        return ResponseEntity.status(ErrorCode.INTERNAL_SERVER_ERROR.getStatus()).body(body);
     }
 }

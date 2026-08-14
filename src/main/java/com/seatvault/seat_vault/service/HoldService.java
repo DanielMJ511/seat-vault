@@ -11,6 +11,7 @@ import com.seatvault.seat_vault.entity.HoldSeat;
 import com.seatvault.seat_vault.entity.HoldStatus;
 import com.seatvault.seat_vault.entity.User;
 import com.seatvault.seat_vault.exception.ApiException;
+import com.seatvault.seat_vault.exception.ErrorCode;
 import com.seatvault.seat_vault.repository.EventSeatRepository;
 import com.seatvault.seat_vault.repository.HoldRepository;
 import com.seatvault.seat_vault.repository.HoldSeatRepository;
@@ -21,7 +22,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -58,11 +58,11 @@ public class HoldService {
         List<Long> seatIds = request.eventSeatIds().stream().distinct().sorted().toList();
 
         if (seatIds.isEmpty()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "EMPTY_SEAT_LIST",
+            throw new ApiException(ErrorCode.EMPTY_SEAT_LIST,
                     "At least one seat must be requested.");
         }
         if (seatIds.size() > holdProperties.maxSeatsPerHold()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "TOO_MANY_SEATS",
+            throw new ApiException(ErrorCode.TOO_MANY_SEATS,
                     "A hold may cover at most " + holdProperties.maxSeatsPerHold() + " seats.");
         }
         if (spansMultipleEvents(seatIds)) {
@@ -71,7 +71,7 @@ public class HoldService {
             // going to roll back (see ADR-0006: EventSeat.id already encodes
             // which event a seat belongs to, so this is a cheap lookup, not
             // a client-supplied eventId cross-check).
-            throw new ApiException(HttpStatus.BAD_REQUEST, "MULTIPLE_EVENTS_IN_HOLD",
+            throw new ApiException(ErrorCode.MULTIPLE_EVENTS_IN_HOLD,
                     "All seats in a hold must belong to the same event.");
         }
 
@@ -91,7 +91,7 @@ public class HoldService {
                     // Genuine contention on this seat right now - fail fast
                     // without ever touching Postgres for this request (the
                     // whole point of the Redis layer per ADR-0001).
-                    throw new ApiException(HttpStatus.CONFLICT, "SEAT_ALREADY_HELD",
+                    throw new ApiException(ErrorCode.SEAT_ALREADY_HELD,
                             "Seat " + seatId + " is currently being requested by another user.");
                 }
                 acquiredLocks.add(new AcquiredLock(seatId, token.get()));
@@ -109,7 +109,7 @@ public class HoldService {
         Instant now = Instant.now();
 
         User user = userRepository.findById(userId)
-                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "USER_NOT_FOUND", "User no longer exists."));
+                .orElseThrow(() -> new ApiException(ErrorCode.USER_NOT_FOUND, "User no longer exists."));
 
         Hold hold = holdRepository.save(Hold.builder()
                 .user(user)
@@ -122,7 +122,7 @@ public class HoldService {
             // The actual correctness mechanism: a Postgres row lock, held
             // until this transaction commits or rolls back.
             EventSeat eventSeat = eventSeatRepository.findByIdForUpdate(seatId)
-                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "EVENT_SEAT_NOT_FOUND",
+                    .orElseThrow(() -> new ApiException(ErrorCode.EVENT_SEAT_NOT_FOUND,
                             "Event seat " + seatId + " not found."));
 
             EventSeatStatus effectiveStatus = EventSeatAvailability.effectiveStatus(eventSeat);
@@ -132,11 +132,11 @@ public class HoldService {
                 // seat" from "retry in a bit" (all-or-nothing: rolling back
                 // the transaction undoes every mutation made earlier in this
                 // loop too).
-                throw new ApiException(HttpStatus.CONFLICT, "SEAT_ALREADY_BOOKED",
+                throw new ApiException(ErrorCode.SEAT_ALREADY_BOOKED,
                         "Seat " + seatId + " has already been booked for this event.");
             }
             if (effectiveStatus != EventSeatStatus.AVAILABLE) {
-                throw new ApiException(HttpStatus.CONFLICT, "SEAT_ALREADY_HELD",
+                throw new ApiException(ErrorCode.SEAT_ALREADY_HELD,
                         "Seat " + seatId + " is currently held by another user.");
             }
 
@@ -157,6 +157,12 @@ public class HoldService {
                 // rather than this being moved out of the seat loop. Adding
                 // any read-then-write of a *third* table inside this loop
                 // needs the same care.
+                //
+                // Deliberately not routed through HoldExpiry.isExpired(): the
+                // time comparison it would duplicate has already happened,
+                // inside effectiveStatus() above. This ACTIVE check is a
+                // different question - "has something already reconciled this
+                // Hold" - guarding idempotency, not re-deriving expiry.
                 staleHold.setStatus(HoldStatus.EXPIRED);
             }
 
@@ -223,7 +229,7 @@ public class HoldService {
         List<EventSeat> lockedSeats = new ArrayList<>(seatIds.size());
         for (Long seatId : seatIds) {
             lockedSeats.add(eventSeatRepository.findByIdForUpdate(seatId)
-                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "EVENT_SEAT_NOT_FOUND",
+                    .orElseThrow(() -> new ApiException(ErrorCode.EVENT_SEAT_NOT_FOUND,
                             "Event seat " + seatId + " not found.")));
         }
 
@@ -241,10 +247,21 @@ public class HoldService {
                 .filter(h -> h.getUser().getId().equals(userId))
                 // Same code whether the hold doesn't exist at all or belongs
                 // to someone else - don't let a non-owner distinguish the two.
-                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "HOLD_NOT_FOUND", "Hold not found."));
+                .orElseThrow(() -> new ApiException(ErrorCode.HOLD_NOT_FOUND, "Hold not found."));
 
         if (hold.getStatus() != HoldStatus.ACTIVE) {
-            throw new ApiException(HttpStatus.CONFLICT, "HOLD_NOT_ACTIVE", "Hold is not active.");
+            // ADR-0009: the split is keyed on domain state via HoldExpiry, not
+            // on the fact that this particular check fired - a hold whose
+            // stored status is already EXPIRED (sweep, or ADR-0007's manual
+            // release) reports HOLD_EXPIRED same as the lazy-expiry path
+            // elsewhere does; only a CONVERTED hold - which can't happen for
+            // releaseHold in practice, since a converted hold no longer owns
+            // any seats for a non-owner to have raced in on, but is not
+            // provably impossible - falls through to HOLD_NOT_ACTIVE.
+            if (HoldExpiry.isExpired(hold)) {
+                throw new ApiException(ErrorCode.HOLD_EXPIRED, "Hold has expired.");
+            }
+            throw new ApiException(ErrorCode.HOLD_NOT_ACTIVE, "Hold is not active.");
         }
 
         for (EventSeat eventSeat : lockedSeats) {

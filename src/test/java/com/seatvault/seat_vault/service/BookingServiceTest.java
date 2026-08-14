@@ -155,7 +155,9 @@ class BookingServiceTest {
                 .satisfies(ex -> {
                     ApiException apiException = (ApiException) ex;
                     assertThat(apiException.getStatus()).isEqualTo(HttpStatus.CONFLICT);
-                    assertThat(apiException.getCode()).isEqualTo("HOLD_NOT_ACTIVE");
+                    // Stored status is EXPIRED - ADR-0009's split keys HOLD_EXPIRED
+                    // vs HOLD_NOT_ACTIVE on domain state, not on which check fired.
+                    assertThat(apiException.getCode()).isEqualTo("HOLD_EXPIRED");
                 });
 
         verify(eventSeatRepository).findByIdForUpdate(12L);
@@ -206,6 +208,9 @@ class BookingServiceTest {
                 .satisfies(ex -> {
                     ApiException apiException = (ApiException) ex;
                     assertThat(apiException.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    // ownedHold is not time-expired (expiresAt is +300s), so
+                    // ADR-0009's HoldExpiry-keyed split falls through to the
+                    // defensive HOLD_NOT_ACTIVE answer here, not HOLD_EXPIRED.
                     assertThat(apiException.getCode()).isEqualTo("HOLD_NOT_ACTIVE");
                 });
 
@@ -246,7 +251,10 @@ class BookingServiceTest {
                 .satisfies(ex -> {
                     ApiException apiException = (ApiException) ex;
                     assertThat(apiException.getStatus()).isEqualTo(HttpStatus.CONFLICT);
-                    assertThat(apiException.getCode()).isEqualTo("HOLD_NOT_ACTIVE");
+                    // Stored ACTIVE but past its TTL - the lazy-expiry site
+                    // (BookingService:154-ish) reports HOLD_EXPIRED per ADR-0009,
+                    // the same code a stored-EXPIRED hold reports.
+                    assertThat(apiException.getCode()).isEqualTo("HOLD_EXPIRED");
                 });
 
         verify(bookingRepository, never()).save(any());

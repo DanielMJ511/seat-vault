@@ -256,7 +256,9 @@ class HoldServiceTest {
                 .satisfies(ex -> {
                     ApiException apiException = (ApiException) ex;
                     assertThat(apiException.getStatus()).isEqualTo(HttpStatus.CONFLICT);
-                    assertThat(apiException.getCode()).isEqualTo("HOLD_NOT_ACTIVE");
+                    // Stored status is EXPIRED - ADR-0009's split keys HOLD_EXPIRED
+                    // vs HOLD_NOT_ACTIVE on domain state, not on which check fired.
+                    assertThat(apiException.getCode()).isEqualTo("HOLD_EXPIRED");
                 });
     }
 

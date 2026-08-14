@@ -6,13 +6,13 @@ import com.seatvault.seat_vault.dto.RegisterRequest;
 import com.seatvault.seat_vault.dto.UserResponse;
 import com.seatvault.seat_vault.entity.User;
 import com.seatvault.seat_vault.exception.ApiException;
+import com.seatvault.seat_vault.exception.ErrorCode;
 import com.seatvault.seat_vault.repository.UserRepository;
 import com.seatvault.seat_vault.security.AuthenticatedUser;
 import com.seatvault.seat_vault.security.JwtService;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DataIntegrityViolationException;
-import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -44,7 +44,7 @@ public class AuthService {
     @Transactional
     public AuthResponse register(RegisterRequest request) {
         if (userRepository.existsByEmailIgnoreCase(request.email())) {
-            throw new ApiException(HttpStatus.CONFLICT, "EMAIL_ALREADY_REGISTERED",
+            throw new ApiException(ErrorCode.EMAIL_ALREADY_REGISTERED,
                     "An account with this email already exists.");
         }
 
@@ -62,7 +62,7 @@ public class AuthService {
             // trip the uq_users_email_lower constraint here. Translate it to
             // the same 409 the pre-check would have produced instead of
             // letting it fall through to the generic 500 handler.
-            throw new ApiException(HttpStatus.CONFLICT, "EMAIL_ALREADY_REGISTERED",
+            throw new ApiException(ErrorCode.EMAIL_ALREADY_REGISTERED,
                     "An account with this email already exists.");
         }
 
@@ -77,7 +77,7 @@ public class AuthService {
                 found.map(User::getPasswordHash).orElse(DUMMY_HASH_FOR_TIMING_SAFETY));
 
         if (found.isEmpty() || !matches) {
-            throw new ApiException(HttpStatus.UNAUTHORIZED, "INVALID_CREDENTIALS", INVALID_CREDENTIALS_MESSAGE);
+            throw new ApiException(ErrorCode.INVALID_CREDENTIALS, INVALID_CREDENTIALS_MESSAGE);
         }
 
         return issueTokenFor(found.get());
@@ -86,7 +86,7 @@ public class AuthService {
     @Transactional(readOnly = true)
     public UserResponse currentUser(AuthenticatedUser principal) {
         User user = userRepository.findById(principal.id())
-                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "USER_NOT_FOUND",
+                .orElseThrow(() -> new ApiException(ErrorCode.USER_NOT_FOUND,
                         "User no longer exists."));
 
         return new UserResponse(user.getId(), user.getEmail(), user.getCreatedAt());

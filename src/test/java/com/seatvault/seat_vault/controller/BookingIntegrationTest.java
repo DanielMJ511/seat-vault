@@ -223,7 +223,7 @@ class BookingIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(new CreateBookingRequest(holdId))))
                 .andExpect(MockMvcResultMatchers.status().isConflict())
-                .andExpect(MockMvcResultMatchers.jsonPath("$.code").value(equalTo("HOLD_NOT_ACTIVE")));
+                .andExpect(MockMvcResultMatchers.jsonPath("$.code").value(equalTo("HOLD_EXPIRED")));
 
         assertThat(bookingRepository.findByHoldId(holdId)).isEmpty();
     }

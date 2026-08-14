@@ -15,6 +15,7 @@ import com.seatvault.seat_vault.entity.HoldStatus;
 import com.seatvault.seat_vault.entity.Payment;
 import com.seatvault.seat_vault.entity.PaymentStatus;
 import com.seatvault.seat_vault.exception.ApiException;
+import com.seatvault.seat_vault.exception.ErrorCode;
 import com.seatvault.seat_vault.repository.BookingRepository;
 import com.seatvault.seat_vault.repository.BookingSeatRepository;
 import com.seatvault.seat_vault.repository.EventSeatRepository;
@@ -28,7 +29,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -101,7 +101,7 @@ public class BookingService {
             // The actual correctness mechanism: a Postgres row lock, held
             // until this transaction commits or rolls back.
             lockedSeats.add(eventSeatRepository.findByIdForUpdate(seatId)
-                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "EVENT_SEAT_NOT_FOUND",
+                    .orElseThrow(() -> new ApiException(ErrorCode.EVENT_SEAT_NOT_FOUND,
                             "Event seat " + seatId + " not found.")));
         }
 
@@ -113,10 +113,21 @@ public class BookingService {
                 .filter(h -> h.getUser().getId().equals(userId))
                 // Same code whether the hold doesn't exist at all or belongs
                 // to someone else - don't let a non-owner distinguish the two.
-                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "HOLD_NOT_FOUND", "Hold not found."));
+                .orElseThrow(() -> new ApiException(ErrorCode.HOLD_NOT_FOUND, "Hold not found."));
 
         if (hold.getStatus() != HoldStatus.ACTIVE) {
-            throw new ApiException(HttpStatus.CONFLICT, "HOLD_NOT_ACTIVE", "Hold is not active.");
+            // ADR-0009: keyed on domain state (HoldExpiry), not on the fact
+            // that this particular check fired. A stored-EXPIRED hold (the
+            // sweep, or ADR-0007's manual release) reports HOLD_EXPIRED - the
+            // same code the lazy-expiry check below reports for a hold that
+            // is ACTIVE in storage but past its TTL, so a client never learns
+            // whether HoldSweepService happened to have run. Only a
+            // CONVERTED hold - already turned into a different Booking -
+            // reports HOLD_NOT_ACTIVE.
+            if (HoldExpiry.isExpired(hold)) {
+                throw new ApiException(ErrorCode.HOLD_EXPIRED, "Hold has expired.");
+            }
+            throw new ApiException(ErrorCode.HOLD_NOT_ACTIVE, "Hold is not active.");
         }
         if (lockedSeats.isEmpty()) {
             // Shouldn't happen - HoldService#createHold never persists a Hold
@@ -125,7 +136,11 @@ public class BookingService {
             // rather than silently producing a $0, zero-seat one. Checked
             // after the two lookups above so an unknown or foreign hold id
             // still answers 404 rather than leaking through as this 409.
-            throw new ApiException(HttpStatus.CONFLICT, "HOLD_NOT_ACTIVE", "Hold has no seats.");
+            //
+            // Not an expiry situation at all (the hold above is confirmed
+            // ACTIVE), so this stays HOLD_NOT_ACTIVE unconditionally - there
+            // is no domain state for HoldExpiry to key off here.
+            throw new ApiException(ErrorCode.HOLD_NOT_ACTIVE, "Hold has no seats.");
         }
 
         List<BookingSeat> bookingSeats = new ArrayList<>(lockedSeats.size());
@@ -140,7 +155,25 @@ public class BookingService {
             // from an earlier read.
             Hold seatHold = eventSeat.getCurrentHold();
             if (seatHold == null || !seatHold.getId().equals(hold.getId())) {
-                throw new ApiException(HttpStatus.CONFLICT, "HOLD_NOT_ACTIVE", "Hold is not active.");
+                // T-007's new guard, and the one site in this split that
+                // doesn't map cleanly onto either neighbour by pattern (ADR-0009).
+                // `hold` is confirmed ACTIVE above, so CONVERTED is not in play,
+                // and the comment above says this branch should be unreachable
+                // outside an ADR-0010 violation - so neither "just expired" nor
+                // "genuinely impossible" can be assumed by fiat. Key it on the
+                // same domain-state test every other site in this split uses
+                // instead: if this Hold's own expiresAt has actually passed,
+                // the client's correct action is identical to any other expired
+                // hold - start over - so HOLD_EXPIRED is the honest answer. If
+                // it hasn't, this really is the invariant violation the comment
+                // above describes, and HOLD_NOT_ACTIVE's defensive "this hold
+                // can't be used" answer is the conservative fallback, matching
+                // the zero-seat guard above rather than inventing a third code
+                // for a state that should never occur.
+                if (HoldExpiry.isExpired(hold)) {
+                    throw new ApiException(ErrorCode.HOLD_EXPIRED, "Hold has expired.");
+                }
+                throw new ApiException(ErrorCode.HOLD_NOT_ACTIVE, "Hold is not active.");
             }
 
             EventSeatStatus effectiveStatus = EventSeatAvailability.effectiveStatus(eventSeat);
@@ -151,7 +184,10 @@ public class BookingService {
                 // sweep/lazy-check will catch it later. BOOKED is unreachable
                 // via the guard above (a booked seat carries no currentHold),
                 // but reject defensively rather than silently trusting that.
-                throw new ApiException(HttpStatus.CONFLICT, "HOLD_NOT_ACTIVE", "Hold is not active.");
+                // Either way the domain-state test (ADR-0009) says HOLD_EXPIRED:
+                // a lazily-expired hold is expired regardless of whether the
+                // sweep has flipped Hold.status yet.
+                throw new ApiException(ErrorCode.HOLD_EXPIRED, "Hold has expired.");
             }
 
             eventSeat.setStatus(EventSeatStatus.BOOKED);
@@ -202,7 +238,7 @@ public class BookingService {
         // this row lock.
         Booking booking = bookingRepository.findByIdForUpdate(bookingId)
                 .filter(b -> b.getUser().getId().equals(userId))
-                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "BOOKING_NOT_FOUND", "Booking not found."));
+                .orElseThrow(() -> new ApiException(ErrorCode.BOOKING_NOT_FOUND, "Booking not found."));
 
         if (booking.getStatus() != BookingStatus.PENDING) {
             // A repeat confirm call - a legitimate client retry (e.g. after a
@@ -212,7 +248,7 @@ public class BookingService {
         }
 
         Payment payment = paymentRepository.findByBookingId(bookingId)
-                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "PAYMENT_NOT_FOUND", "Payment not found."));
+                .orElseThrow(() -> new ApiException(ErrorCode.PAYMENT_NOT_FOUND, "Payment not found."));
 
         PaymentStatus outcome = paymentService.charge(booking, payment.getAmount());
         if (outcome != PaymentStatus.SUCCEEDED && outcome != PaymentStatus.FAILED) {
@@ -249,10 +285,10 @@ public class BookingService {
     public BookingResponse cancel(Long userId, Long bookingId) {
         Booking booking = bookingRepository.findByIdForUpdate(bookingId)
                 .filter(b -> b.getUser().getId().equals(userId))
-                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "BOOKING_NOT_FOUND", "Booking not found."));
+                .orElseThrow(() -> new ApiException(ErrorCode.BOOKING_NOT_FOUND, "Booking not found."));
 
         if (booking.getStatus() != BookingStatus.CONFIRMED) {
-            throw new ApiException(HttpStatus.CONFLICT, "BOOKING_NOT_CONFIRMED", "Booking is not confirmed.");
+            throw new ApiException(ErrorCode.BOOKING_NOT_CONFIRMED, "Booking is not confirmed.");
         }
 
         // Hold is already CONVERTED and Payment stays SUCCEEDED - CONTEXT.md
@@ -274,7 +310,7 @@ public class BookingService {
     public BookingResponse getBooking(Long userId, Long bookingId) {
         Booking booking = bookingRepository.findById(bookingId)
                 .filter(b -> b.getUser().getId().equals(userId))
-                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "BOOKING_NOT_FOUND", "Booking not found."));
+                .orElseThrow(() -> new ApiException(ErrorCode.BOOKING_NOT_FOUND, "Booking not found."));
 
         return toResponse(booking);
     }
@@ -294,7 +330,7 @@ public class BookingService {
 
         for (Long seatId : seatIds) {
             EventSeat eventSeat = eventSeatRepository.findByIdForUpdate(seatId)
-                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "EVENT_SEAT_NOT_FOUND",
+                    .orElseThrow(() -> new ApiException(ErrorCode.EVENT_SEAT_NOT_FOUND,
                             "Event seat " + seatId + " not found."));
             // Defensive, mirroring HoldService#releaseHold's ownership guard:
             // this booking is the only thing that should ever hold a seat in
@@ -314,7 +350,7 @@ public class BookingService {
     private BookingResponse toResponse(Booking booking) {
         List<BookingSeat> bookingSeats = bookingSeatRepository.findByBookingId(booking.getId());
         Payment payment = paymentRepository.findByBookingId(booking.getId())
-                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "PAYMENT_NOT_FOUND", "Payment not found."));
+                .orElseThrow(() -> new ApiException(ErrorCode.PAYMENT_NOT_FOUND, "Payment not found."));
         return toResponse(booking, bookingSeats, payment);
     }
 

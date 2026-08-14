@@ -3,11 +3,11 @@ package com.seatvault.seat_vault.service;
 import com.seatvault.seat_vault.dto.EventSeatResponse;
 import com.seatvault.seat_vault.entity.EventSeat;
 import com.seatvault.seat_vault.exception.ApiException;
+import com.seatvault.seat_vault.exception.ErrorCode;
 import com.seatvault.seat_vault.repository.EventRepository;
 import com.seatvault.seat_vault.repository.EventSeatRepository;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -21,7 +21,7 @@ public class EventSeatService {
     @Transactional(readOnly = true)
     public List<EventSeatResponse> listForEvent(Long eventId) {
         if (!eventRepository.existsById(eventId)) {
-            throw new ApiException(HttpStatus.NOT_FOUND, "EVENT_NOT_FOUND", "Event not found.");
+            throw new ApiException(ErrorCode.EVENT_NOT_FOUND, "Event not found.");
         }
 
         return eventSeatRepository.findByEventIdWithSeatAndHold(eventId).stream()
