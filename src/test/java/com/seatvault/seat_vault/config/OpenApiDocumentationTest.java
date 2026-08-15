@@ -98,18 +98,18 @@ class OpenApiDocumentationTest {
     /**
      * The security-relevant assertion this task packet called out explicitly:
      * these two reads are user-scoped (the response depends on who's asking),
-     * so ADR-0004 requires {@code bearerAuth} on them. Since T-008, {@code
-     * SecurityConfig} also enforces this at the filter-chain level (see
-     * {@code BookingIntegrationTest}'s anonymous-request tests) - this class
-     * only checks that the OpenAPI document agrees with that enforcement, not
-     * the enforcement itself.
+     * so ADR-0004 requires {@code bearerAuth} on them, including a documented
+     * 401. Since T-008, {@code SecurityConfig} also enforces this at the
+     * filter-chain level (see {@code BookingIntegrationTest}'s
+     * anonymous-request tests) - this class only checks that the OpenAPI
+     * document agrees with that enforcement, not the enforcement itself.
      */
     @Test
-    void userScopedBookingReadsDeclareBearerAuthDespiteBeingUserScopedGets() throws Exception {
+    void userScopedBookingReadsDeclareBearerAuthAndDocumentTheirRealResponseSet() throws Exception {
         JsonNode doc = fetchDocument();
 
-        assertOperation(doc, "/api/bookings/me", "get", statuses("200", "404"), true);
-        assertOperation(doc, "/api/bookings/{id}", "get", statuses("200", "400", "404"), true);
+        assertOperation(doc, "/api/bookings/me", "get", statuses("200", "404", "401"), true);
+        assertOperation(doc, "/api/bookings/{id}", "get", statuses("200", "400", "404", "401"), true);
     }
 
     /**

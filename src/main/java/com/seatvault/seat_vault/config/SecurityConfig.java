@@ -27,11 +27,11 @@ import tools.jackson.databind.ObjectMapper;
  * The governing principle (see {@code docs/adr/0004-auth-boundary-is-response-identity-dependence-not-http-verb.md})
  * is that a route is public if and only if its response doesn't depend on
  * who's asking — not simply "GET is public." {@code /api/auth/register} and
- * {@code /api/auth/login} plus any {@code GET /api/**} request are currently
- * public; the blanket GET rule is a placeholder standing in for
- * catalog/browse endpoints M3 hasn't introduced yet, not a claim that every
- * future GET should be public. {@code GET /api/auth/me}, {@code GET
- * /api/bookings/me}, and {@code GET /api/bookings/{id}} are the user-scoped
+ * {@code /api/auth/login} are always public, and most {@code GET /api/**}
+ * requests are public too, but that blanket GET rule is a placeholder
+ * standing in for catalog/browse endpoints M3 hasn't introduced yet, not a
+ * claim that every future GET should be public. {@code GET /api/auth/me},
+ * {@code GET /api/bookings/me}, and {@code GET /api/bookings/{id}} are the user-scoped
  * exceptions today: their matchers are registered ahead of both permitAll
  * rules so they always require authentication. Any future user-scoped GET
  * must get the same explicit carve-out, registered before the blanket GET

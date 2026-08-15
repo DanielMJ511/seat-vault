@@ -153,8 +153,9 @@ public class BookingController {
     // path specificity rules regardless of declaration order, so this is safe
     // even though it's declared after "/{id}/confirm" above.
     //
-    // ErrorCode.PAYMENT_NOT_FOUND (404) - see the class-level Javadoc for why
-    // bearerAuth is declared despite SecurityConfig not enforcing it today.
+    // ErrorCode.PAYMENT_NOT_FOUND (404) - see the class-level Javadoc for the
+    // authenticated() carve-out this operation needs to actually enforce
+    // bearerAuth (T-008).
     @Operation(summary = "List every booking belonging to the authenticated caller, newest first.")
     @SecurityRequirement(name = "bearerAuth")
     @ApiResponse(responseCode = "200", description = "The caller's bookings.",
@@ -166,14 +167,19 @@ public class BookingController {
                     examples = @ExampleObject(name = "PAYMENT_NOT_FOUND", value = """
                             {"timestamp":"2026-01-01T00:00:00Z","status":404,"code":"PAYMENT_NOT_FOUND",\
                             "message":"Payment not found.","path":"/api/bookings/me"}""")))
+    @ApiResponse(responseCode = "401", description = "Authentication is required to access this resource.",
+            content = @Content(schema = @Schema(implementation = ErrorResponse.class),
+                    examples = @ExampleObject(name = "UNAUTHENTICATED", value = """
+                            {"timestamp":"2026-01-01T00:00:00Z","status":401,"code":"UNAUTHENTICATED",\
+                            "message":"Authentication is required to access this resource.","path":"/api/bookings/me"}""")))
     @GetMapping("/me")
     public List<BookingResponse> listMine(@AuthenticationPrincipal AuthenticatedUser principal) {
         return bookingService.listBookings(principal.id());
     }
 
     // ErrorCode.BOOKING_NOT_FOUND / PAYMENT_NOT_FOUND (404, ADR-0008) - see the
-    // class-level Javadoc for why bearerAuth is declared despite SecurityConfig
-    // not enforcing it today.
+    // class-level Javadoc for the authenticated() carve-out this operation
+    // needs to actually enforce bearerAuth (T-008).
     @Operation(summary = "Get a single booking belonging to the authenticated caller.")
     @SecurityRequirement(name = "bearerAuth")
     @ApiResponse(responseCode = "200", description = "The booking.",
@@ -191,6 +197,11 @@ public class BookingController {
                     examples = @ExampleObject(name = "BOOKING_NOT_FOUND", value = """
                             {"timestamp":"2026-01-01T00:00:00Z","status":404,"code":"BOOKING_NOT_FOUND",\
                             "message":"Booking not found.","path":"/api/bookings/1"}""")))
+    @ApiResponse(responseCode = "401", description = "Authentication is required to access this resource.",
+            content = @Content(schema = @Schema(implementation = ErrorResponse.class),
+                    examples = @ExampleObject(name = "UNAUTHENTICATED", value = """
+                            {"timestamp":"2026-01-01T00:00:00Z","status":401,"code":"UNAUTHENTICATED",\
+                            "message":"Authentication is required to access this resource.","path":"/api/bookings/1"}""")))
     @GetMapping("/{id}")
     public BookingResponse getById(@AuthenticationPrincipal AuthenticatedUser principal, @PathVariable Long id) {
         return bookingService.getBooking(principal.id(), id);
