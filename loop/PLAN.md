@@ -49,8 +49,8 @@ were ever reverted, so the two are complementary, not alternatives.
 Both run before T-004 because live correctness defects outrank an error-code refactor.
 
 ## Verification (from issue)
-- [ ] Full `mvn test` suite green
-- [ ] Manual smoke test via Swagger UI
+- [x] Full `mvn test` suite green — 109 tests, 0 failures, ~1m15s (was 80 at milestone start)
+- [ ] Manual smoke test via Swagger UI — **user action**; needs a running app, so not doable from the loop
 
 ## Domain non-goals (from issue)
 Issue #12 carries no `## Domain non-goals (CONTEXT.md)` section. The MVP non-goals already
