@@ -643,6 +643,34 @@ class BookingIntegrationTest {
         assertThat(reloadedSeat.getCurrentHold()).isNull();
     }
 
+    /**
+     * T-008 regression coverage, explicit and per-route rather than the
+     * general {@code OpenApiDocumentationTest#everyDeclaredBearerAuthOperationRejectsAnonymousRequestsWith401}
+     * check: before the fix, {@code SecurityConfig}'s blanket
+     * {@code GET /api/**} permitAll rule let this request through with no
+     * {@code Authentication} populated, {@code @AuthenticationPrincipal}
+     * resolved to {@code null}, and {@code principal.id()} NPEd into a 500.
+     * Mirrors {@code AuthIntegrationTest#meWithoutTokenIsUnauthorized}.
+     */
+    @Test
+    void listMineWithoutTokenIsUnauthorized() throws Exception {
+        mockMvc.perform(MockMvcRequestBuilders.get("/api/bookings/me"))
+                .andExpect(MockMvcResultMatchers.status().isUnauthorized())
+                .andExpect(MockMvcResultMatchers.jsonPath("$.status").value(401))
+                .andExpect(MockMvcResultMatchers.jsonPath("$.code").value(equalTo("UNAUTHENTICATED")))
+                .andExpect(MockMvcResultMatchers.jsonPath("$.path").value(equalTo("/api/bookings/me")));
+    }
+
+    /** See {@link #listMineWithoutTokenIsUnauthorized()}. */
+    @Test
+    void getByIdWithoutTokenIsUnauthorized() throws Exception {
+        mockMvc.perform(MockMvcRequestBuilders.get("/api/bookings/{id}", 1))
+                .andExpect(MockMvcResultMatchers.status().isUnauthorized())
+                .andExpect(MockMvcResultMatchers.jsonPath("$.status").value(401))
+                .andExpect(MockMvcResultMatchers.jsonPath("$.code").value(equalTo("UNAUTHENTICATED")))
+                .andExpect(MockMvcResultMatchers.jsonPath("$.path").value(equalTo("/api/bookings/1")));
+    }
+
     private long createHold(String token, Long... seatIds) throws Exception {
         String body = mockMvc.perform(MockMvcRequestBuilders.post("/api/holds")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)

@@ -30,11 +30,15 @@ import tools.jackson.databind.ObjectMapper;
  * {@code /api/auth/login} plus any {@code GET /api/**} request are currently
  * public; the blanket GET rule is a placeholder standing in for
  * catalog/browse endpoints M3 hasn't introduced yet, not a claim that every
- * future GET should be public. {@code GET /api/auth/me} is the first
- * user-scoped exception: its matcher is registered ahead of both permitAll
- * rules so it always requires authentication. Any future user-scoped GET
- * (e.g. "my bookings") must get the same explicit carve-out, registered
- * before the blanket GET rule — matcher order is first-match-wins.
+ * future GET should be public. {@code GET /api/auth/me}, {@code GET
+ * /api/bookings/me}, and {@code GET /api/bookings/{id}} are the user-scoped
+ * exceptions today: their matchers are registered ahead of both permitAll
+ * rules so they always require authentication. Any future user-scoped GET
+ * must get the same explicit carve-out, registered before the blanket GET
+ * rule — matcher order is first-match-wins. (T-008: the booking pair above
+ * was originally missed; see {@code OpenApiDocumentationTest} for a
+ * doc/enforcement-agreement check and {@code BookingIntegrationTest} for the
+ * anonymous-request regression test.)
  */
 @Configuration
 @EnableWebSecurity
@@ -52,7 +56,8 @@ public class SecurityConfig {
                 .formLogin(formLogin -> formLogin.disable())
                 .httpBasic(httpBasic -> httpBasic.disable())
                 .authorizeHttpRequests(authorize -> authorize
-                        .requestMatchers(HttpMethod.GET, "/api/auth/me").authenticated()
+                        .requestMatchers(HttpMethod.GET, "/api/auth/me", "/api/bookings/me", "/api/bookings/{id}")
+                        .authenticated()
                         .requestMatchers(HttpMethod.POST, "/api/auth/register", "/api/auth/login").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/**").permitAll()
                         .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()

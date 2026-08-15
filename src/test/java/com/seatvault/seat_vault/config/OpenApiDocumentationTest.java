@@ -2,11 +2,14 @@ package com.seatvault.seat_vault.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.HttpMethod;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
@@ -19,10 +22,14 @@ import tools.jackson.databind.ObjectMapper;
  * (T-005), rather than relying on manual Swagger UI inspection: every
  * controller must carry an {@code @Operation} summary, its real set of
  * {@code @ApiResponse} statuses, and {@code bearerAuth} exactly where
- * ADR-0004 says an operation is user-scoped - regardless of whether {@code
- * SecurityConfig} actually enforces that today (it doesn't, for {@code
- * GET /api/bookings/me} and {@code GET /api/bookings/{id}} - see the
- * class-level Javadoc on {@link com.seatvault.seat_vault.controller.BookingController}).
+ * ADR-0004 says an operation is user-scoped. As of T-008, {@code
+ * SecurityConfig} enforces that boundary for every operation documented here
+ * as {@code bearerAuth}, including {@code GET /api/bookings/me} and
+ * {@code GET /api/bookings/{id}} - see
+ * {@link com.seatvault.seat_vault.controller.BookingController}'s class
+ * Javadoc, and {@code BookingIntegrationTest}/{@code AuthIntegrationTest}
+ * for the anonymous-request enforcement tests (this class only checks the
+ * OpenAPI document, not the live security filter chain).
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -91,12 +98,11 @@ class OpenApiDocumentationTest {
     /**
      * The security-relevant assertion this task packet called out explicitly:
      * these two reads are user-scoped (the response depends on who's asking),
-     * so ADR-0004 requires {@code bearerAuth} on them even though {@code
-     * SecurityConfig}'s blanket {@code GET /api/**} permitAll rule doesn't
-     * enforce it today. Documenting the intended contract here is deliberate
-     * - see {@link com.seatvault.seat_vault.controller.BookingController}'s
-     * class Javadoc for the full explanation of the gap, which is out of
-     * scope to fix in this task.
+     * so ADR-0004 requires {@code bearerAuth} on them. Since T-008, {@code
+     * SecurityConfig} also enforces this at the filter-chain level (see
+     * {@code BookingIntegrationTest}'s anonymous-request tests) - this class
+     * only checks that the OpenAPI document agrees with that enforcement, not
+     * the enforcement itself.
      */
     @Test
     void userScopedBookingReadsDeclareBearerAuthDespiteBeingUserScopedGets() throws Exception {
@@ -104,6 +110,69 @@ class OpenApiDocumentationTest {
 
         assertOperation(doc, "/api/bookings/me", "get", statuses("200", "404"), true);
         assertOperation(doc, "/api/bookings/{id}", "get", statuses("200", "400", "404"), true);
+    }
+
+    /**
+     * T-008's stale-resistant guardrail. Rather than pinning individual
+     * routes, this walks every operation the generated OpenAPI document
+     * actually declares {@code bearerAuth} on - regardless of HTTP verb -
+     * and fires each one anonymously against the live {@code
+     * SecurityFilterChain}. Every declared {@code @SecurityRequirement(name
+     * = "bearerAuth")} in the codebase is a claim that the operation is
+     * user-scoped per ADR-0004; this test makes that claim self-enforcing by
+     * construction, so a future GET/POST/etc. that declares {@code
+     * bearerAuth} (as {@code OpenApiDocumentationTest}'s other tests already
+     * require of any user-scoped operation) but whose {@code SecurityConfig}
+     * matcher carve-out is forgotten - exactly T-008's bug, and exactly what
+     * {@code SecurityConfig}'s own Javadoc predicted and didn't prevent -
+     * fails this test automatically, with no edit to this file required.
+     * {@code assertThat(operationsChecked)} below guards against the walk
+     * silently checking zero operations if the document's shape ever
+     * changes.
+     */
+    @Test
+    void everyDeclaredBearerAuthOperationRejectsAnonymousRequestsWith401() throws Exception {
+        JsonNode doc = fetchDocument();
+        JsonNode paths = doc.get("paths");
+        Set<String> httpMethods = Set.of("get", "post", "put", "patch", "delete");
+
+        int operationsChecked = 0;
+        for (Map.Entry<String, JsonNode> pathEntry : paths.properties()) {
+            String templatePath = pathEntry.getKey();
+            JsonNode pathItem = pathEntry.getValue();
+            for (Map.Entry<String, JsonNode> methodEntry : pathItem.properties()) {
+                String httpMethod = methodEntry.getKey();
+                if (!httpMethods.contains(httpMethod)) {
+                    continue;
+                }
+                JsonNode operation = methodEntry.getValue();
+                boolean requiresBearerAuth = operation.has("security") && !operation.get("security").isEmpty();
+                if (!requiresBearerAuth) {
+                    continue;
+                }
+
+                // Path variables (e.g. {id}) don't need a real value here -
+                // Spring Security's authorization check runs before the
+                // request ever reaches the controller/repository layer, so
+                // any concrete segment is enough to exercise the matcher.
+                String concretePath = templatePath.replaceAll("\\{[^}]+}", "1");
+                int status = mockMvc.perform(MockMvcRequestBuilders.request(
+                                HttpMethod.valueOf(httpMethod.toUpperCase()), concretePath))
+                        .andReturn()
+                        .getResponse()
+                        .getStatus();
+                assertThat(status)
+                        .as("anonymous %s %s declares bearerAuth in the OpenAPI document, so SecurityConfig "
+                                        + "must reject it with 401 rather than %d",
+                                httpMethod.toUpperCase(), concretePath, status)
+                        .isEqualTo(401);
+                operationsChecked++;
+            }
+        }
+
+        assertThat(operationsChecked)
+                .as("this test should have found at least the auth/holds/bookings bearerAuth operations")
+                .isGreaterThanOrEqualTo(6);
     }
 
     private JsonNode fetchDocument() throws Exception {

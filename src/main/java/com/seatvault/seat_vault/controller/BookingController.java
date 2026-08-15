@@ -28,24 +28,15 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * User-scoped throughout: every response here depends on which user is
  * asking, so every operation is documented as {@code bearerAuth} per
- * ADR-0004 - {@code create}/{@code confirm}/{@code cancel} genuinely enforce
- * this today ({@code SecurityConfig} only permits GET requests without a
- * token, and none of these three are GETs, so they fall through to {@code
- * anyRequest().authenticated()}).
- *
- * <p><b>{@code listMine} and {@code getById} do not.</b> {@code
- * SecurityConfig}'s blanket {@code GET /api/**} permitAll rule has no
- * explicit carve-out for these two user-scoped GETs (unlike {@code GET
- * /api/auth/me}, which is carved out ahead of that rule) - so an anonymous
- * caller's request is let through by Spring Security, {@code
- * @AuthenticationPrincipal} resolves to {@code null} since no {@code
- * Authentication} was ever populated, and {@code principal.id()} below NPEs
- * into a generic 500 rather than a clean 401. Confirmed empirically via
- * MockMvc against the live filter chain. This is a real security
- * misconfiguration per ADR-0004, not a documentation gap - {@code
- * bearerAuth} is declared here to reflect the *intended* contract, but
- * fixing {@code SecurityConfig} itself is out of scope for this change (see
- * T-005's task packet) and needs its own follow-up task.
+ * ADR-0004, and {@code SecurityConfig} enforces it for all five operations.
+ * {@code create}/{@code confirm}/{@code cancel} aren't GETs, so they fall
+ * through to {@code anyRequest().authenticated()}. {@code listMine} and
+ * {@code getById} are GETs, so - like {@code GET /api/auth/me} - they need
+ * an explicit {@code authenticated()} carve-out registered ahead of
+ * {@code SecurityConfig}'s blanket {@code GET /api/**} permitAll rule
+ * (matcher order is first-match-wins); T-008 added that carve-out for
+ * {@code /api/bookings/me} and {@code /api/bookings/{id}} after M6 shipped
+ * them without one.
  */
 @RestController
 @RequestMapping("/api/bookings")
