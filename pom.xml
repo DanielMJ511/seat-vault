@@ -11,20 +11,28 @@
 	<groupId>com.seatvault</groupId>
 	<artifactId>seat-vault</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
-	<name/>
-	<description/>
-	<url/>
+	<name>SeatVault</name>
+	<description>Event seat-reservation backend: expiring seat holds and payment-confirmed bookings,
+		kept correct under concurrent contention by Postgres row locks.</description>
+	<url>https://github.com/DanielMJ511/seat-vault</url>
 	<licenses>
-		<license/>
+		<license>
+			<name>MIT License</name>
+			<url>https://github.com/DanielMJ511/seat-vault/blob/main/LICENSE</url>
+			<distribution>repo</distribution>
+		</license>
 	</licenses>
 	<developers>
-		<developer/>
+		<developer>
+			<name>Daniel Mejia</name>
+			<url>https://github.com/DanielMJ511</url>
+		</developer>
 	</developers>
 	<scm>
-		<connection/>
-		<developerConnection/>
-		<tag/>
-		<url/>
+		<connection>scm:git:https://github.com/DanielMJ511/seat-vault.git</connection>
+		<developerConnection>scm:git:ssh://git@github.com/DanielMJ511/seat-vault.git</developerConnection>
+		<tag>HEAD</tag>
+		<url>https://github.com/DanielMJ511/seat-vault</url>
 	</scm>
 	<properties>
 		<java.version>25</java.version>
