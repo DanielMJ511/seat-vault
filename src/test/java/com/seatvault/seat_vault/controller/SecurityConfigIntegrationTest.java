@@ -6,6 +6,7 @@ import static org.hamcrest.Matchers.equalTo;
 import com.seatvault.seat_vault.config.TestcontainersConfig;
 import com.seatvault.seat_vault.repository.UserRepository;
 import com.seatvault.seat_vault.security.JwtService;
+import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -211,56 +212,105 @@ class SecurityConfigIntegrationTest {
     }
 
     /**
-     * A verified discrepancy against the T-002 task packet, recorded here
-     * rather than worked around: the packet's acceptance criteria expected
-     * an anonymous {@code /actuator/health/readiness} response to show
-     * per-indicator status because of {@code show-components=always}.
-     * Decompiling Boot 4.1.0's actual behaviour shows that is not yet true.
+     * Supersedes what was, until T-003, a test pinning a T-002-only interim
+     * state - recorded here rather than deleted, per T-003's packet, because
+     * the earlier state was itself a verified discrepancy against the T-002
+     * task packet worth keeping the history of.
      *
-     * <p>Boot only creates a real, property-driven health group (one that
-     * inherits {@code management.endpoint.health.show-components}/
-     * {@code show-details} from the top level) for a group name that
-     * {@code management.endpoint.health.group.<name>.*} actually configures.
-     * T-002's scope boundary deliberately excludes that - T-003 owns
-     * {@code readiness.include=readinessState,db} per ADR-0013. Until T-003
-     * lands, Boot's {@code AvailabilityProbesHealthEndpointGroupsPostProcessor}
-     * silently substitutes a synthetic probe group
-     * ({@code AvailabilityProbesHealthEndpointGroup}) for both "liveness" and
-     * "readiness" whose {@code showComponents()}/{@code showDetails()} are
-     * hardcoded {@code false} - not defaulted from properties, hardcoded -
-     * regardless of what {@code show-components}/{@code show-details} say.
-     * So today both paths return exactly {@code {"status":"UP"}}.
+     * <p>Before T-003, {@code management.endpoint.health.group.<name>.*} was
+     * unconfigured for both "liveness" and "readiness", so Boot substituted a
+     * synthetic probe group ({@code AvailabilityProbesHealthEndpointGroup})
+     * whose {@code showComponents()}/{@code showDetails()} compile to
+     * hardcoded {@code false} - ignoring {@code show-components}/
+     * {@code show-details} entirely - and both paths returned exactly
+     * {@code {"status":"UP"}}.
      *
-     * <p>This is not a regression risk: it is strictly <em>more</em>
-     * conservative than the ADR-0012 target (nothing beyond the bare status
-     * is exposed, whereas the target exposes per-indicator status), and it
-     * corrects itself automatically the moment T-003 configures the groups -
-     * no change needed here. See
-     * {@link #showComponentsAndShowDetailsAlreadyGovernTheAuthenticatedParentAggregate()}
-     * for proof that the two properties are correctly wired at the one place
-     * they already apply today.
+     * <p>T-003 (ADR-0013) declares
+     * {@code management.endpoint.health.group.readiness.include=readinessState,db}
+     * and {@code management.endpoint.health.group.liveness.include=livenessState}.
+     * Declaring a group explicitly is what switches Boot from the synthetic
+     * probe group to a real, property-driven one that inherits
+     * {@code show-components=always}/{@code show-details=when-authorized}
+     * from the top level - with no change to {@code SecurityConfig} or this
+     * test's request shape. This pins the resulting shape exactly as tightly
+     * as the superseded test pinned the old one: each path now carries a
+     * {@code components} object naming exactly its configured members, and
+     * still no {@code details} for an anonymous caller (that half is
+     * unchanged - {@code show-details=when-authorized} was already true
+     * before T-003, it just had no group to apply to).
      */
     @Test
-    void anonymousLivenessAndReadinessExposeOnlyBareStatusUntilT003ConfiguresTheGroups() throws Exception {
-        for (String path : new String[] {"/actuator/health/liveness", "/actuator/health/readiness"}) {
-            String body = mockMvc.perform(MockMvcRequestBuilders.get(path))
-                    .andExpect(MockMvcResultMatchers.status().isOk())
-                    .andReturn()
-                    .getResponse()
-                    .getContentAsString();
-            JsonNode node = objectMapper.readTree(body);
+    void anonymousLivenessAndReadinessExposePerIndicatorStatusSinceT003ConfiguredTheGroups() throws Exception {
+        String livenessBody = mockMvc.perform(MockMvcRequestBuilders.get("/actuator/health/liveness"))
+                .andExpect(MockMvcResultMatchers.status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        JsonNode liveness = objectMapper.readTree(livenessBody);
+        assertThat(liveness.get("status").asText()).isEqualTo("UP");
+        assertThat(liveness.get("components").properties())
+                .as("liveness must expose exactly its one configured member, livenessState")
+                .extracting(Map.Entry::getKey)
+                .containsExactlyInAnyOrder("livenessState");
+        assertThat(liveness.get("components").get("livenessState").has("details"))
+                .as("an anonymous caller must never see a detail payload (show-details=when-authorized)")
+                .isFalse();
 
-            assertThat(node.get("status").asText()).as("%s should report UP", path).isEqualTo("UP");
-            assertThat(node.has("components"))
-                    .as(
-                            "%s: Boot's synthetic probe group hardcodes showComponents=false until T-003 "
-                                    + "configures this group explicitly - see this test's Javadoc",
-                            path)
-                    .isFalse();
-            assertThat(node.has("details"))
-                    .as("%s should never carry a detail payload for an anonymous caller", path)
-                    .isFalse();
-        }
+        String readinessBody = mockMvc.perform(MockMvcRequestBuilders.get("/actuator/health/readiness"))
+                .andExpect(MockMvcResultMatchers.status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        JsonNode readiness = objectMapper.readTree(readinessBody);
+        assertThat(readiness.get("status").asText()).isEqualTo("UP");
+        assertThat(readiness.get("components").properties())
+                .as(
+                        "readiness must expose exactly its two configured members (readinessState, db) and never"
+                                + " redis - ADR-0013's whole point")
+                .extracting(Map.Entry::getKey)
+                .containsExactlyInAnyOrder("readinessState", "db");
+        assertThat(readiness.get("components").get("db").has("details"))
+                .as("an anonymous caller must never see a detail payload (show-details=when-authorized)")
+                .isFalse();
+    }
+
+    /**
+     * ADR-0013's readiness-composition claim, asserted behaviourally against
+     * the live group rather than by re-reading the property file: {@code db}
+     * is a readiness member and {@code redis} is not. This proves only that
+     * one half - which indicators the readiness probe is built from. It does
+     * <b>not</b> prove that a failing {@code db} indicator makes readiness
+     * report {@code DOWN}; that follow-on is Boot's own status-aggregation
+     * behaviour once a {@code DOWN} member exists, not something this
+     * codebase implements, and a broken-datasource context is not available
+     * to test it directly (Flyway migrates at startup and {@code ddl-auto=
+     * validate} runs immediately after, so the context cannot even come up
+     * without a working database - see ADR-0013's "Consequences" section).
+     * Uses an authenticated caller with {@code show-components=always}/
+     * {@code show-details=when-authorized} so {@code components} is
+     * populated to inspect at all.
+     */
+    @Test
+    void readinessGroupIncludesDbButNotRedisForAuthenticatedCaller() throws Exception {
+        long userId = userRepository.findByEmailIgnoreCase(SEEDED_EMAIL).orElseThrow().getId();
+        String token = jwtService.generateToken(userId, SEEDED_EMAIL);
+
+        String body = mockMvc.perform(MockMvcRequestBuilders.get("/actuator/health/readiness")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(MockMvcResultMatchers.status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        JsonNode readiness = objectMapper.readTree(body);
+
+        JsonNode components = readiness.get("components");
+        assertThat(components).isNotNull();
+        assertThat(components.has("db"))
+                .as("db must be a readiness member - Postgres is fatal to readiness per ADR-0001/ADR-0013")
+                .isTrue();
+        assertThat(components.has("redis"))
+                .as("redis must NOT be a readiness member - it must never be able to fail readiness per ADR-0001")
+                .isFalse();
     }
 
     /**
