@@ -646,11 +646,13 @@ class BookingIntegrationTest {
     /**
      * T-008 regression coverage, explicit and per-route rather than the
      * general {@code OpenApiDocumentationTest#everyDeclaredBearerAuthOperationRejectsAnonymousRequestsWith401}
-     * check: before the fix, {@code SecurityConfig}'s blanket
-     * {@code GET /api/**} permitAll rule let this request through with no
-     * {@code Authentication} populated, {@code @AuthenticationPrincipal}
-     * resolved to {@code null}, and {@code principal.id()} NPEd into a 500.
-     * Mirrors {@code AuthIntegrationTest#meWithoutTokenIsUnauthorized}.
+     * check: at the time, {@code SecurityConfig} ended in a blanket
+     * {@code GET /api/**} permitAll rule, and this route had no carve-out
+     * ahead of it - so the request arrived with no {@code Authentication}
+     * populated, {@code @AuthenticationPrincipal} resolved to {@code null},
+     * and {@code principal.id()} NPEd into a 500. That rule is gone as of
+     * #14 (the chain now denies by default), but this stays as per-route
+     * proof. Mirrors {@code AuthIntegrationTest#meWithoutTokenIsUnauthorized}.
      */
     @Test
     void listMineWithoutTokenIsUnauthorized() throws Exception {

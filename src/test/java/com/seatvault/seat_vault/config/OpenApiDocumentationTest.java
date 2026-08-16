@@ -122,10 +122,12 @@ class OpenApiDocumentationTest {
      * user-scoped per ADR-0004; this test makes that claim self-enforcing by
      * construction, so a future GET/POST/etc. that declares {@code
      * bearerAuth} (as {@code OpenApiDocumentationTest}'s other tests already
-     * require of any user-scoped operation) but whose {@code SecurityConfig}
-     * matcher carve-out is forgotten - exactly T-008's bug, and exactly what
-     * {@code SecurityConfig}'s own Javadoc predicted and didn't prevent -
-     * fails this test automatically, with no edit to this file required.
+     * require of any user-scoped operation) but which {@code SecurityConfig}
+     * does not actually enforce - exactly T-008's bug - fails this test
+     * automatically, with no edit to this file required. Since #14 that
+     * enforcement gap is much harder to open, the chain now denying by
+     * default, but this check is what proves the two agree rather than
+     * assuming it.
      * {@code assertThat(operationsChecked)} below guards against the walk
      * silently checking zero operations if the document's shape ever
      * changes.

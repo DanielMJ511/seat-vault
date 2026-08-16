@@ -29,14 +29,15 @@ import org.springframework.web.bind.annotation.RestController;
  * User-scoped throughout: every response here depends on which user is
  * asking, so every operation is documented as {@code bearerAuth} per
  * ADR-0004, and {@code SecurityConfig} enforces it for all five operations.
- * {@code create}/{@code confirm}/{@code cancel} aren't GETs, so they fall
- * through to {@code anyRequest().authenticated()}. {@code listMine} and
- * {@code getById} are GETs, so - like {@code GET /api/auth/me} - they need
- * an explicit {@code authenticated()} carve-out registered ahead of
- * {@code SecurityConfig}'s blanket {@code GET /api/**} permitAll rule
- * (matcher order is first-match-wins); T-008 added that carve-out for
- * {@code /api/bookings/me} and {@code /api/bookings/{id}} after M6 shipped
- * them without one.
+ * <p>
+ * Since #14 that enforcement needs nothing from this class: the filter chain
+ * denies by default, so these five are authenticated because they are not on
+ * its short list of public routes, not because anyone remembered to protect
+ * them. Historically they did need remembering, and M6 shipped
+ * {@code GET /api/bookings/me} and {@code GET /api/bookings/{id}} without it
+ * - they matched a blanket {@code GET /api/**} permitAll rule and were
+ * served anonymously until T-008 (#12). {@code BookingIntegrationTest} keeps
+ * the per-route regression tests for that.
  */
 @RestController
 @RequestMapping("/api/bookings")
@@ -153,9 +154,7 @@ public class BookingController {
     // path specificity rules regardless of declaration order, so this is safe
     // even though it's declared after "/{id}/confirm" above.
     //
-    // ErrorCode.PAYMENT_NOT_FOUND (404) - see the class-level Javadoc for the
-    // authenticated() carve-out this operation needs to actually enforce
-    // bearerAuth (T-008).
+    // ErrorCode.PAYMENT_NOT_FOUND (404)
     @Operation(summary = "List every booking belonging to the authenticated caller, newest first.")
     @SecurityRequirement(name = "bearerAuth")
     @ApiResponse(responseCode = "200", description = "The caller's bookings.",
@@ -177,9 +176,7 @@ public class BookingController {
         return bookingService.listBookings(principal.id());
     }
 
-    // ErrorCode.BOOKING_NOT_FOUND / PAYMENT_NOT_FOUND (404, ADR-0008) - see the
-    // class-level Javadoc for the authenticated() carve-out this operation
-    // needs to actually enforce bearerAuth (T-008).
+    // ErrorCode.BOOKING_NOT_FOUND / PAYMENT_NOT_FOUND (404, ADR-0008)
     @Operation(summary = "Get a single booking belonging to the authenticated caller.")
     @SecurityRequirement(name = "bearerAuth")
     @ApiResponse(responseCode = "200", description = "The booking.",

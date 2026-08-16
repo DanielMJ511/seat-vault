@@ -22,23 +22,37 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Stateless JWT-based security configuration.
+ * Stateless JWT-based security configuration, <b>deny by default</b>.
  * <p>
  * The governing principle (see {@code docs/adr/0004-auth-boundary-is-response-identity-dependence-not-http-verb.md})
  * is that a route is public if and only if its response doesn't depend on
- * who's asking — not simply "GET is public." {@code /api/auth/register} and
- * {@code /api/auth/login} are always public, and most {@code GET /api/**}
- * requests are public too, but that blanket GET rule is a placeholder
- * standing in for catalog/browse endpoints M3 hasn't introduced yet, not a
- * claim that every future GET should be public. {@code GET /api/auth/me},
- * {@code GET /api/bookings/me}, and {@code GET /api/bookings/{id}} are the user-scoped
- * exceptions today: their matchers are registered ahead of both permitAll
- * rules so they always require authentication. Any future user-scoped GET
- * must get the same explicit carve-out, registered before the blanket GET
- * rule — matcher order is first-match-wins. (T-008: the booking pair above
- * was originally missed; see {@code OpenApiDocumentationTest} for a
- * doc/enforcement-agreement check and {@code BookingIntegrationTest} for the
- * anonymous-request regression test.)
+ * who's asking — not simply "GET is public."
+ * <p>
+ * The chain below enumerates the public routes and ends at
+ * {@code anyRequest().authenticated()}. Nothing else is listed, because
+ * nothing else needs to be: a route added without an auth decision is
+ * authenticated automatically. That inversion is the point. Until #14 this
+ * chain ended with a blanket {@code GET /api/**} permitAll, which made the
+ * default <em>allow</em> and left safety depending on remembering to
+ * register an {@code authenticated()} carve-out for each user-scoped GET
+ * ahead of it. "Forgot to carve out an exception" fails open and is
+ * invisible; "forgot to permit a public route" fails closed with a 401 and
+ * is obvious the first time anyone calls it.
+ * <p>
+ * That was not a theoretical concern. {@code GET /api/bookings/me} and
+ * {@code GET /api/bookings/{id}} shipped in M6 without a carve-out and were
+ * served to anonymous callers until T-008 (#12) — and the Javadoc this text
+ * replaces had explicitly warned that any future user-scoped GET would need
+ * one, naming "my bookings" as the example. A comment in the right file
+ * naming the right route did not prevent the bug, which is the whole
+ * argument for a structural default over a documented convention.
+ * <p>
+ * One residual remains, deliberately: a user-scoped route whose path matches
+ * an existing public pattern (say {@code GET /api/events/mine} sliding under
+ * {@code /api/events/{id}}) would still be permitted here. It is caught from
+ * the annotation side instead, by
+ * {@code OpenApiDocumentationTest#everyPrincipalConsumingHandlerDeclaresBearerAuth}
+ * (#15). See {@code SecurityConfigIntegrationTest} for the posture tests.
  */
 @Configuration
 @EnableWebSecurity
@@ -56,11 +70,26 @@ public class SecurityConfig {
                 .formLogin(formLogin -> formLogin.disable())
                 .httpBasic(httpBasic -> httpBasic.disable())
                 .authorizeHttpRequests(authorize -> authorize
-                        .requestMatchers(HttpMethod.GET, "/api/auth/me", "/api/bookings/me", "/api/bookings/{id}")
-                        .authenticated()
+                        // Public: the two ways to obtain a token. Everything
+                        // else under /api/auth is user-scoped.
                         .requestMatchers(HttpMethod.POST, "/api/auth/register", "/api/auth/login").permitAll()
-                        .requestMatchers(HttpMethod.GET, "/api/**").permitAll()
+                        // Public: catalog/browse reads. Each returns the same
+                        // answer to every caller, including none, which is
+                        // exactly ADR-0004's test for publicness. Listed
+                        // route by route rather than by prefix so that adding
+                        // a route under one of these paths is not silently
+                        // public too.
+                        .requestMatchers(HttpMethod.GET,
+                                "/api/venues", "/api/venues/{id}",
+                                "/api/events", "/api/events/{id}",
+                                "/api/events/{eventId}/seats").permitAll()
+                        // Public: the API documentation. A trailing /** also
+                        // matches zero segments, so /v3/api-docs itself is
+                        // covered by the first pattern.
                         .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
+                        // Everything else — including any route added without
+                        // an auth decision, and any path with no handler at
+                        // all — requires authentication.
                         .anyRequest().authenticated())
                 .exceptionHandling(exceptionHandling -> exceptionHandling
                         .authenticationEntryPoint(authenticationEntryPoint())

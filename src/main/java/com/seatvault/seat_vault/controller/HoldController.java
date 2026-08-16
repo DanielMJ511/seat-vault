@@ -24,10 +24,10 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * User-scoped: every operation here is authenticated per ADR-0004 (neither
- * matched by {@code SecurityConfig}'s blanket GET permitAll rule, since
- * neither method is a GET, so both fall through to {@code
- * anyRequest().authenticated()}).
+ * User-scoped: every operation here is authenticated per ADR-0004, by way of
+ * {@code SecurityConfig}'s deny-by-default chain - neither route appears on
+ * its list of public routes, so both fall through to
+ * {@code anyRequest().authenticated()}.
  */
 @RestController
 @RequestMapping("/api/holds")
