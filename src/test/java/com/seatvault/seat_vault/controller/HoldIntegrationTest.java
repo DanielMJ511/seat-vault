@@ -361,10 +361,13 @@ class HoldIntegrationTest {
         entityManager.flush();
 
         holdSweepService.sweepExpiredHolds();
-        // The sweep's @Modifying bulk updates run as raw SQL against this
-        // same transaction's connection without clearing the persistence
-        // context (matching the plan's exact repository query shape), so
-        // clear it here to avoid re-reading stale first-level-cache entities.
+        // The sweep now runs three statements on this same transaction's
+        // connection (T-001/#16): a native locking id projection, then two
+        // @Modifying bulk updates. None of the three populate this
+        // transaction's persistence context - the projection is a scalar
+        // native query (ADR-0010) and the bulk updates are raw SQL - so
+        // Hibernate's first-level cache still doesn't know any of it
+        // happened. Clear it here to avoid re-reading stale cached entities.
         entityManager.clear();
 
         EventSeat reloadedSeat = eventSeatRepository.findById(seat.getId()).orElseThrow();

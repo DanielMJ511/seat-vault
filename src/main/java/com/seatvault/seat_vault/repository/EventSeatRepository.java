@@ -68,14 +68,64 @@ public interface EventSeatRepository extends JpaRepository<EventSeat, Long> {
     List<Long> findDistinctEventIdsByIdIn(@Param("ids") List<Long> ids);
 
     /**
+     * Locks, in ascending id order, every {@code event_seats} row {@code
+     * HoldSweepService} is about to release, and returns their ids - the
+     * same ordering discipline every other multi-seat path uses (ADR-0011's
+     * "seat-versus-seat residual, closed in M8 (#16)"). Without this, the
+     * bulk {@code UPDATE} below would lock the rows it matches in whatever
+     * order Postgres's plan produced them, which can disagree with a
+     * concurrent multi-seat {@code createHold} locking the same two seats
+     * and deadlock it - a legitimate request turned into a 500.
+     *
+     * <p><b>Native, not JPQL.</b> Hibernate does not reliably emit {@code
+     * FOR UPDATE} for a scalar JPQL projection, so the row-locking {@code
+     * ORDER BY ... FOR UPDATE} has to be hand-written and its generated SQL
+     * confirmed directly, not trusted from the annotation. <b>{@code FOR
+     * UPDATE OF es}, never bare {@code FOR UPDATE}</b>: the predicate joins
+     * {@code holds}, and a bare {@code FOR UPDATE} would take the {@code
+     * holds} row lock too, in this same statement - fixing the
+     * seat-versus-seat ordering while breaking the seats-before-holds
+     * ordering ADR-0011 requires everywhere else. Confirmed against real
+     * Postgres that {@code LockRows} sits above {@code Sort} in this query's
+     * plan, i.e. the sort runs first and rows are locked in the ascending
+     * order it produces, not in the join's own scan order.
+     *
+     * <p>Still a scalar id projection per ADR-0010 - {@code
+     * HoldSweepService} passes the returned ids straight into {@link
+     * #releaseExpiredHeldSeats} without ever materializing an {@code
+     * EventSeat} entity.
+     */
+    @Query(
+            value = """
+                    select es.id from event_seats es
+                    join holds ch on ch.id = es.current_hold_id
+                    where es.status = 'HELD'
+                      and ch.expires_at < :now
+                    order by es.id
+                    for update of es
+                    """,
+            nativeQuery = true)
+    List<Long> findIdsOfExpiredHeldSeatsForUpdate(@Param("now") Instant now);
+
+    /**
      * UX-only bulk reconciliation used by {@code HoldSweepService}; the lazy
      * check-on-read in {@code HoldService}/{@code EventSeatAvailability} is
      * what's actually authoritative (ADR-0002).
+     *
+     * <p>{@code ids} is expected to be exactly what {@link
+     * #findIdsOfExpiredHeldSeatsForUpdate} just locked, in the same
+     * transaction - this statement's own scan order therefore no longer
+     * matters, it only re-touches rows already locked. The rest of the
+     * predicate is kept anyway (rather than trusting {@code ids} alone) so a
+     * stale or empty list is a no-op instead of a wrong write; callers must
+     * still skip calling this at all for an empty list, since {@code id in
+     * ()} is invalid SQL.
      */
     @Modifying
     @Query("update EventSeat es set es.status = com.seatvault.seat_vault.entity.EventSeatStatus.AVAILABLE, "
             + "es.currentHold = null "
-            + "where es.status = com.seatvault.seat_vault.entity.EventSeatStatus.HELD "
+            + "where es.id in :ids "
+            + "and es.status = com.seatvault.seat_vault.entity.EventSeatStatus.HELD "
             + "and es.currentHold.expiresAt < :now")
-    int releaseExpiredHeldSeats(@Param("now") Instant now);
+    int releaseExpiredHeldSeats(@Param("ids") List<Long> ids, @Param("now") Instant now);
 }

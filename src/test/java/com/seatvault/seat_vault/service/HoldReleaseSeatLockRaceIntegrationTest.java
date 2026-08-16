@@ -75,9 +75,10 @@ import org.springframework.transaction.support.TransactionTemplate;
  * which the release could slip through and produce a false pass.
  *
  * <p><b>The thief transaction is manufactured, and says so.</b> It is not a
- * replay of a production sequence: it frees the seat with {@link
- * EventSeatRepository#releaseExpiredHeldSeats} — the sweep's own statement,
- * which touches {@code event_seats} only — and then creates a genuine new
+ * replay of a production sequence: it frees the seat with the sweep's own
+ * two {@code event_seats}-only statements ({@link
+ * EventSeatRepository#findIdsOfExpiredHeldSeatsForUpdate} then {@link
+ * EventSeatRepository#releaseExpiredHeldSeats}) — and then creates a genuine new
  * hold through {@link HoldService#createHold}, deliberately splitting apart
  * two things no single production path does in that combination, and
  * bypassing {@code HoldSweepService} rather than waiting for it. What it
@@ -200,9 +201,14 @@ class HoldReleaseSeatLockRaceIntegrationTest {
 
         try {
             transactionTemplate.executeWithoutResult(status -> {
-                // First statement, so the seat row is locked before the
-                // releasing thread can possibly reach it.
-                eventSeatRepository.releaseExpiredHeldSeats(Instant.now());
+                // First statements, so the seat row is locked before the
+                // releasing thread can possibly reach it. Mirrors
+                // HoldSweepService#sweepExpiredHolds's own two-statement
+                // shape (ADR-0011's seat-versus-seat ordering) rather than
+                // calling the bulk UPDATE directly.
+                Instant now = Instant.now();
+                List<Long> expiredSeatIds = eventSeatRepository.findIdsOfExpiredHeldSeatsForUpdate(now);
+                eventSeatRepository.releaseExpiredHeldSeats(expiredSeatIds, now);
 
                 release.set(executor.submit(() -> {
                     try {
