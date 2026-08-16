@@ -36,6 +36,12 @@ services:
     build: .
     container_name: seatvault-app
     profiles: ["app"]
+    # No healthcheck: block here on purpose. The image itself declares a
+    # HEALTHCHECK (see Dockerfile) polling /actuator/health/readiness, and
+    # `depends_on: condition: service_healthy` reads a container's health
+    # status from the image, not from this file - so a compose-level
+    # healthcheck would only restate the image's and risk drifting out of
+    # sync with it. Do not add one here.
     depends_on:
       postgres:
         condition: service_healthy

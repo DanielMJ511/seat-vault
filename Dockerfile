@@ -31,6 +31,29 @@ USER seatvault
 
 EXPOSE 8080
 
+# Polls readiness, not the parent /actuator/health: the parent is authenticated
+# (ADR-0012), so an anonymous healthcheck could not reach it even if it wanted
+# to, and readiness is also the semantically correct target here -
+# `depends_on: condition: service_healthy` in docker-compose.yml asks whether
+# traffic may be routed to this container, not whether the process should be
+# restarted. Polling the parent would additionally let Redis mark the app
+# unhealthy, undoing ADR-0013's whole point (Redis is a fail-fast optimization,
+# not the concurrency authority, so it must not be able to evict a working
+# instance) through the back door.
+#
+# wget, not curl: this runtime base is Alpine/BusyBox, which ships wget but
+# not curl - confirmed against eclipse-temurin:25-jre-alpine directly rather
+# than assumed. `--spider -q` makes it a pure existence/status check with no
+# output, exiting non-zero on anything but a 2xx/3xx response.
+#
+# start-period=40s covers Flyway migrations plus Spring context startup,
+# which take far longer than Postgres/Redis's own healthchecks in
+# docker-compose.yml (interval/timeout/retries: 5s/5s/5) budget for; failures
+# during the start period don't count against retries, so a normal boot
+# doesn't get flagged unhealthy or thrash the container.
+HEALTHCHECK --start-period=40s --interval=10s --timeout=3s --retries=3 \
+  CMD wget --spider -q http://localhost:8080/actuator/health/readiness || exit 1
+
 # Every setting this image needs is already environment-driven in
 # application.properties: DB_URL, DB_USER, DB_PASSWORD, REDIS_HOST,
 # REDIS_PORT, JWT_SECRET. Set JWT_SECRET to a real value outside dev: the
