@@ -1,0 +1,20 @@
+# Build output - the image builds its own inside the build stage.
+target/
+
+# VCS and agent/working state: none of it affects the built artifact, and
+# excluding it keeps the build context small and cache-stable.
+.git/
+.github/
+.claude/
+loop/
+docs/
+
+# Docs and local scratch
+*.md
+!README.md
+*.log
+
+# Local tooling
+.idea/
+.vscode/
+*.iml

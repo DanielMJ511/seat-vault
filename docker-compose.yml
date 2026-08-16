@@ -27,5 +27,31 @@ services:
       timeout: 5s
       retries: 5
 
+  # Gated behind a compose profile on purpose: plain `docker-compose up -d`
+  # keeps meaning "start the two backing services I develop against", which
+  # is what README.md and CLAUDE.md document. Opt in with
+  # `docker compose --profile app up -d --build` to run the app itself in a
+  # container too.
+  app:
+    build: .
+    container_name: seatvault-app
+    profiles: ["app"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Container-to-container, so service names rather than localhost.
+      DB_URL: jdbc:postgresql://postgres:5432/seatvault
+      DB_USER: seatvault
+      DB_PASSWORD: seatvault
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      # dev also loads db/seed, so there is demo data to book against.
+      SPRING_PROFILES_ACTIVE: dev
+    ports:
+      - "8080:8080"
+
 volumes:
   seatvault-postgres-data:
