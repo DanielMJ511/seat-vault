@@ -9,6 +9,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.time.Instant;
 import java.util.stream.Collectors;
@@ -65,6 +66,39 @@ public class GlobalExceptionHandler {
                 request.getRequestURI()
         );
         return ResponseEntity.status(ErrorCode.INVALID_PARAMETER.getStatus()).body(body);
+    }
+
+    /**
+     * Spring MVC signals "no handler matched this path" by throwing
+     * {@link NoResourceFoundException}. Without this method it falls through
+     * to {@link #handleUnexpectedException} below and is reported as a 500,
+     * logged at {@code ERROR} with a stack trace - which is wrong twice
+     * over: it tells the caller the server is broken and their request may
+     * be worth retrying, and it makes every mistyped URL, stale bookmark,
+     * and vulnerability scanner look like an incident in the logs.
+     * <p>
+     * Logged at {@code DEBUG} rather than {@code WARN} for that second
+     * reason: on a public endpoint this fires constantly and carries no
+     * signal about the application's own health.
+     * <p>
+     * Registered ahead of the catch-all by specificity, not by declaration
+     * order - Spring resolves the most specific applicable
+     * {@code @ExceptionHandler} - but the two are kept adjacent so the
+     * relationship is visible. See ADR-0009 for why this gets its own code
+     * rather than reusing a resource-level 404.
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ErrorResponse> handleNoResourceFound(
+            NoResourceFoundException ex, HttpServletRequest request) {
+        log.debug("No handler for request [{}]", request.getRequestURI());
+        ErrorResponse body = new ErrorResponse(
+                Instant.now(),
+                ErrorCode.ROUTE_NOT_FOUND.getStatus().value(),
+                ErrorCode.ROUTE_NOT_FOUND.name(),
+                ErrorCode.ROUTE_NOT_FOUND.getDescription(),
+                request.getRequestURI()
+        );
+        return ResponseEntity.status(ErrorCode.ROUTE_NOT_FOUND.getStatus()).body(body);
     }
 
     @ExceptionHandler(Exception.class)

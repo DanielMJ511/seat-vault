@@ -59,6 +59,11 @@ public enum ErrorCode {
     // --- Request-shape / infrastructure (thrown by GlobalExceptionHandler itself) ---
     VALIDATION_ERROR(HttpStatus.BAD_REQUEST, "The request body failed bean-validation constraints."),
     INVALID_PARAMETER(HttpStatus.BAD_REQUEST, "A path or query parameter could not be converted to its expected type."),
+    ROUTE_NOT_FOUND(HttpStatus.NOT_FOUND,
+            "No endpoint exists at the requested path - check the URL against the API documentation. Distinct "
+                    + "from the resource-level 404s above (VENUE_NOT_FOUND, BOOKING_NOT_FOUND, ...), which mean "
+                    + "the endpoint is correct and the entity it names is not there: the caller's next action is "
+                    + "to fix the path, not the id."),
     INTERNAL_SERVER_ERROR(HttpStatus.INTERNAL_SERVER_ERROR, "An unexpected error occurred."),
 
     // --- Security layer (written directly by SecurityConfig; never reaches GlobalExceptionHandler) ---
