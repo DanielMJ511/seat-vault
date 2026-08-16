@@ -2,18 +2,25 @@ package com.seatvault.seat_vault.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
+import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.http.HttpMethod;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -42,6 +49,10 @@ class OpenApiDocumentationTest {
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    @Qualifier("requestMappingHandlerMapping")
+    private RequestMappingHandlerMapping handlerMapping;
 
     @Test
     void apiDocsRendersWithoutError() throws Exception {
@@ -175,6 +186,72 @@ class OpenApiDocumentationTest {
         assertThat(operationsChecked)
                 .as("this test should have found at least the auth/holds/bookings bearerAuth operations")
                 .isGreaterThanOrEqualTo(6);
+    }
+
+    /**
+     * Closes the residual gap in the guardrail above (#15). That walk can
+     * only check operations which already declare {@code bearerAuth}; an
+     * endpoint that declares <em>nothing</em> is simply not in its set, so
+     * nothing marks it as user-scoped and nothing knows to test it. Since
+     * #14 a missing declaration no longer means a missing 401 - the chain
+     * denies by default - but it does still mean a route nobody has stated
+     * an intent for, and it defeats the one case deny-by-default cannot see:
+     * a user-scoped route whose path matches an existing public pattern
+     * (a hypothetical {@code GET /api/events/mine} under
+     * {@code /api/events/&#123;id&#125;}).
+     *
+     * <p>So this keys on something an endpoint cannot omit and still work,
+     * rather than on its own annotations: a handler that takes
+     * {@code @AuthenticationPrincipal} is user-scoped by construction,
+     * because it consumes the caller's identity to build its response. It
+     * cannot drop that parameter without breaking. Requiring such a handler
+     * to declare {@code bearerAuth} then feeds it into the walk above, which
+     * proves enforcement. The loop closes: principal-consumption implies
+     * declaration, declaration implies enforcement.
+     *
+     * <p>Done by reflection over Spring's own {@code
+     * RequestMappingHandlerMapping} rather than by adding ArchUnit - the
+     * property is what matters, not the library, and this needs no new
+     * dependency and no second Spring context.
+     *
+     * <p>The floor below deliberately duplicates the one in {@link
+     * #everyDeclaredBearerAuthOperationRejectsAnonymousRequestsWith401()}
+     * rather than replacing it. The two enumerate through different
+     * machinery and fail differently: that one walks the generated OpenAPI
+     * JSON and would go silently empty if springdoc changed its output
+     * shape, this one walks the handler mapping and would go silently empty
+     * if the controllers stopped resolving. Neither floor would catch the
+     * other's enumeration breaking.
+     */
+    @Test
+    void everyPrincipalConsumingHandlerDeclaresBearerAuth() {
+        int handlersChecked = 0;
+
+        for (HandlerMethod handlerMethod : handlerMapping.getHandlerMethods().values()) {
+            if (!handlerMethod.getBeanType().getPackageName().startsWith("com.seatvault")) {
+                continue;
+            }
+            boolean consumesPrincipal = Arrays.stream(handlerMethod.getMethodParameters())
+                    .anyMatch(parameter -> parameter.hasParameterAnnotation(AuthenticationPrincipal.class));
+            if (!consumesPrincipal) {
+                continue;
+            }
+
+            boolean declaresBearerAuth =
+                    AnnotatedElementUtils.hasAnnotation(handlerMethod.getMethod(), SecurityRequirement.class)
+                            || AnnotatedElementUtils.hasAnnotation(handlerMethod.getBeanType(),
+                                    SecurityRequirement.class);
+            assertThat(declaresBearerAuth)
+                    .as("%s#%s takes @AuthenticationPrincipal, so it is user-scoped by construction (ADR-0004) "
+                                    + "and must declare @SecurityRequirement(name = \"bearerAuth\")",
+                            handlerMethod.getBeanType().getSimpleName(), handlerMethod.getMethod().getName())
+                    .isTrue();
+            handlersChecked++;
+        }
+
+        assertThat(handlersChecked)
+                .as("this rule should have found at least the auth/holds/bookings principal-consuming handlers")
+                .isGreaterThanOrEqualTo(8);
     }
 
     private JsonNode fetchDocument() throws Exception {
