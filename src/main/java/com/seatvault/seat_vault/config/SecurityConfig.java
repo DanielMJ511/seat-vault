@@ -87,6 +87,24 @@ public class SecurityConfig {
                         // matches zero segments, so /v3/api-docs itself is
                         // covered by the first pattern.
                         .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
+                        // Public: the health GROUP paths only (see ADR-0012).
+                        // Liveness/readiness return the same UP/DOWN answer
+                        // to every caller including none, which is exactly
+                        // ADR-0004's test for publicness. Listed route by
+                        // route, never as a /actuator/** prefix, because that
+                        // prefix would also publish /actuator/env and
+                        // /actuator/heapdump the moment either was exposed.
+                        // The parent /actuator/health is deliberately absent
+                        // from this list: per ADR-0013 it reports honestly
+                        // (DOWN when Redis is down), and that honesty is for
+                        // operators, not anonymous callers, so it falls
+                        // through to anyRequest().authenticated() below.
+                        // /actuator/metrics is exposed (see
+                        // application.properties) but ALSO has no matcher
+                        // here — that absence is not an oversight, it is the
+                        // mechanism: deny-by-default authenticates it for
+                        // free. Do not "fix" this by adding a matcher.
+                        .requestMatchers("/actuator/health/liveness", "/actuator/health/readiness").permitAll()
                         // Everything else — including any route added without
                         // an auth decision, and any path with no handler at
                         // all — requires authentication.

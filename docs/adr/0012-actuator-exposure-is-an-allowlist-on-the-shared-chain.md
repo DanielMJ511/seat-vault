@@ -16,7 +16,13 @@ A blanket `/actuator/**` permitAll would have been the natural way to make healt
 
 ## What an anonymous caller learns
 
-`show-components=always` with `show-details=when-authorized`. An anonymous caller sees each indicator's `UP`/`DOWN` and nothing else; an authenticated one sees the detail payloads. The default (`show-details=never`) would have hidden which dependency was down, which ADR-0013 needs visible. The opposite (`show-details=always`) would have published the database engine, the Redis version, and a container filesystem path to anyone, permanently — small individually, and exactly the free reconnaissance a deny-by-default posture exists to withhold.
+`show-components=always` with `show-details=when-authorized`. An authenticated caller sees each indicator and its detail payload; an anonymous one sees only what the group they can reach exposes. `show-details=always` was rejected because it would have published the database engine, the Redis version, and a container filesystem path to anyone, permanently — small individually, and exactly the free reconnaissance a deny-by-default posture exists to withhold.
+
+**What "anonymous" actually reaches is narrower than it first appears, and an earlier draft of this ADR overstated it.** Anonymous callers reach only the liveness and readiness groups, so they see only what is a *member* of those groups. Under ADR-0013 that is `livenessState`, and `readinessState` plus `db`. **Redis is a member of neither**, so no anonymous caller ever learns Redis's state, whatever `show-components` is set to. Redis's true state is an authenticated-only guarantee, delivered through the parent aggregate. Issue #18's "the Redis indicator shows its true state" is satisfied in that narrower sense, and only in that sense.
+
+So `show-components=always` earns its place for two reasons, neither of which is the one first written down: it gives an *authenticated* operator per-indicator visibility on the parent without also enabling `show-details`, and after ADR-0013's groups exist it lets an anonymous caller distinguish `readinessState` from `db` within the readiness group rather than collapsing both into one status.
+
+One Boot behaviour is worth knowing before reading the configuration: a health group honours `show-components`/`show-details` only if it was explicitly configured under `management.endpoint.health.group.<name>.*`. Absent that, Boot substitutes a synthetic probe group whose `showComponents()` and `showDetails()` are hardcoded `false` (verified by disassembling `AvailabilityProbesHealthEndpointGroup` in `spring-boot-health` 4.1.0). The properties are inert for the probe paths until ADR-0013's group composition is declared — the failure mode is silent, and it fails closed rather than open.
 
 ## The accepted cost: nothing can scrape the metrics
 
