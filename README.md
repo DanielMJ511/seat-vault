@@ -18,7 +18,7 @@ The concurrency guarantee is enforced by a full-pipeline test suite that runs re
 
 **An ABBA deadlock with no visible second lock.** Two ordinary requests — releasing a hold while another user claimed one of its seats — deadlocked in Postgres because lock order between `holds` and `event_seats` was inverted on two paths. The line that inverted it was `staleHold.setStatus(EXPIRED)`, which doesn't read like lock acquisition at all: a dirtied entity becomes an `UPDATE` at flush time, and that takes the row lock at a point the caller never chose. Reviewing lock order by reading for lock *calls* misses this every time. ([ADR-0011](docs/adr/0011-event-seats-is-locked-before-holds-everywhere.md), commit `e51d37b`)
 
-**Two user-scoped booking reads reachable anonymously.** `GET /api/bookings/me` and `GET /api/bookings/{id}` were matched by a permissive `GET /api/**` rule, so an unauthenticated caller got a 500 from the missing principal instead of a 401. (commit `89a2b43`; the underlying default-allow posture is tracked in [#14](https://github.com/DanielMJ511/seat-vault/issues/14))
+**Two user-scoped booking reads reachable anonymously.** `GET /api/bookings/me` and `GET /api/bookings/{id}` were matched by a permissive `GET /api/**` rule, so an unauthenticated caller got a 500 from the missing principal instead of a 401. The interesting part is what the fix did *not* do: patching the two routes left the shape that produced them intact — a default of allow, safe only while someone remembers to carve out every exception. The config's own comment had named "my bookings" as the case to watch for, and that didn't prevent it. So the chain was later inverted to deny by default, and a second rule now requires any handler consuming the caller's identity to declare that it needs a token — one makes a forgotten route fail closed, the other makes a forgotten annotation fail the build. (commits `89a2b43`, `daa4317`, `71f7da3`; [ADR-0004](docs/adr/0004-auth-boundary-is-response-identity-dependence-not-http-verb.md))
 
 The [`docs/adr/`](docs/adr/) directory records all 11 decisions, including the ones that were rejected and why.
 
@@ -51,6 +51,16 @@ The `dev` profile matters. Without it Flyway loads schema only, and there is no 
 
 Seed data is deliberately kept out of the default profile so demo accounts can never reach a non-dev environment.
 
+### Or run it entirely in Docker
+
+No local JDK needed — this builds the app image and starts it alongside Postgres and Redis:
+
+```bash
+docker compose --profile app up -d --build
+```
+
+The `app` service sits behind a compose profile, so plain `docker-compose up -d` still starts just the two backing services for local development.
+
 ## Running the tests
 
 ```bash
@@ -58,7 +68,7 @@ Seed data is deliberately kept out of the default profile so demo accounts can n
 ./mvnw test -Dtest=ClassName     # one class
 ```
 
-The suite is 109 tests and takes about a minute and a half. Docker must be running — the integration tests start their own containers.
+The suite is 113 tests and takes about a minute and a half. Docker must be running — the integration tests start their own containers.
 
 ## API
 
@@ -79,10 +89,11 @@ Full request/response schemas are in the Swagger UI above, or at `/v3/api-docs`.
 
 Three tiers, strictly: controller → service → repository. Controllers never touch repositories, entities are never returned from the API (DTOs are `record`s), and errors flow through one `ApiException` → `GlobalExceptionHandler` → `ErrorResponse` path rather than being assembled ad hoc.
 
-Two decisions shape everything else:
+Three decisions shape everything else:
 
 - **Postgres is the concurrency authority** ([ADR-0001](docs/adr/0001-postgres-is-the-concurrency-authority.md)). Correctness rests on `SELECT ... FOR UPDATE` row locks inside a transaction. Redis sits in front as a fail-fast layer to shed obvious contention early, but it is explicitly *not* authoritative — if Redis is down or wrong, the database still cannot be made to oversell. There's an integration test that unplugs Redis and asserts exactly that.
 - **Hold expiry is lazy** ([ADR-0002](docs/adr/0002-lazy-expiry-is-authoritative.md)). A hold whose window has passed is expired as a matter of fact, whether or not anything has noticed yet; readers evaluate expiry themselves rather than trusting a status column. A background sweeper tidies up, but nothing depends on it having run.
+- **Authorization denies by default** ([ADR-0004](docs/adr/0004-auth-boundary-is-response-identity-dependence-not-http-verb.md)). A route is public only if its response is the same for everyone; the filter chain lists those routes and authenticates everything else, so a route added without an auth decision fails closed. Two tests enforce the boundary from opposite sides — one proves an unlisted route is denied, the other proves any handler consuming the caller's identity has declared that it requires a token.
 
 Schema is owned entirely by Flyway migrations with `ddl-auto=validate`, so drift fails loudly at startup instead of being silently patched.
 
@@ -92,8 +103,13 @@ Start with [`CONTEXT.md`](CONTEXT.md) for the domain vocabulary, then [`docs/adr
 
 Tracked as open issues rather than quietly left:
 
-- [#14](https://github.com/DanielMJ511/seat-vault/issues/14) — `SecurityConfig` should default to deny, not allow, for `GET /api/**`
-- [#15](https://github.com/DanielMJ511/seat-vault/issues/15) — the auth guardrail test misses endpoints that declare no `bearerAuth` at all
-- [#16](https://github.com/DanielMJ511/seat-vault/issues/16) — `HoldSweepService` locks `event_seats` in plan-scan order rather than by id
+- [#16](https://github.com/DanielMJ511/seat-vault/issues/16) — `HoldSweepService` locks `event_seats` in plan-scan order rather than by id. The residual seat-vs-seat case left over from ADR-0011's table-vs-table fix: real, but it needs the 30-second sweep to fire mid-flight against an overlapping expired seat set.
+- [#13](https://github.com/DanielMJ511/seat-vault/issues/13) — JWT access tokens are non-revocable. Deferred by design until account-management features exist to need it; the 10-minute expiry is what bounds the window meanwhile ([ADR-0005](docs/adr/0005-jwt-access-tokens-are-stateless-and-non-revocable.md)).
+- [#3](https://github.com/DanielMJ511/seat-vault/issues/3) — Jackson 2 and Jackson 3 both ship in the jar, because `jjwt` and `springdoc` have no Jackson-3-native release yet. Nothing to do but wait.
+- [#4](https://github.com/DanielMJ511/seat-vault/issues/4) — Testcontainers container reuse, filed when the suite was one class. Now measured as a smaller win than expected.
 
 Out of scope for now, deliberately: event-cancellation cascade, refunds, and partial cancellation of a multi-seat booking. Payment is simulated.
+
+## License
+
+[MIT](LICENSE).
