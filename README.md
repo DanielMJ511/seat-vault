@@ -68,7 +68,7 @@ The `app` service sits behind a compose profile, so plain `docker-compose up -d`
 ./mvnw test -Dtest=ClassName     # one class
 ```
 
-The suite is 117 tests and takes about a minute and a half. Docker must be running — the integration tests start their own containers.
+The suite is around 130 tests and takes about a minute and a half. Docker must be running — the integration tests start their own containers.
 
 ## API
 

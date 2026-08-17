@@ -19,6 +19,8 @@ import com.seatvault.seat_vault.repository.HoldRepository;
 import com.seatvault.seat_vault.repository.UserRepository;
 import com.seatvault.seat_vault.security.JwtService;
 import com.seatvault.seat_vault.service.HoldSweepService;
+import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.persistence.EntityManager;
 import java.time.Instant;
 import java.util.List;
@@ -59,6 +61,55 @@ import tools.jackson.databind.ObjectMapper;
  * EventSeatIntegrationTest}'s {@code @Transactional} pattern: MockMvc
  * dispatches in-process on the test thread, so the mutation and the
  * assertion share one transaction that's rolled back automatically.
+ *
+ * <p><b>Why the two sweep-metric tests assert deltas, never absolute values
+ * (T-005).</b> The {@code seatvault.sweep.*} summaries this class reads are
+ * <em>not</em> private to it, and that was measured rather than assumed. This
+ * class's {@code @SpringBootTest @AutoConfigureMockMvc
+ * @Import(TestcontainersConfig.class) @ActiveProfiles("test")
+ * @TestPropertySource(...seed)} annotation set is byte-for-byte shared by ten
+ * classes - {@code AuthIntegrationTest}, {@code
+ * BookingConfirmLoadIntegrationTest}, {@code BookingIntegrationTest}, {@code
+ * EventIntegrationTest}, {@code EventSeatIntegrationTest}, this class, {@code
+ * NoOversellIntegrationTest}, {@code SecurityConfigIntegrationTest}, {@code
+ * VenueIntegrationTest} and {@code GlobalExceptionHandlerIntegrationTest} -
+ * so all ten produce the same {@code MergedContextConfiguration} cache key
+ * and Spring hands them <em>one</em> application context, hence one {@code
+ * MeterRegistry}, one {@code HoldSweepService}, and one Postgres container.
+ * Verified by printing the identity hashes of the injected {@code
+ * ApplicationContext} and {@code MeterRegistry} alongside the live JDBC URL
+ * during a full suite run: identical for all of them.
+ *
+ * <p>Two consequences. First, {@code @EnableScheduling} sits on {@code
+ * SeatVaultApplication} and is not profile-gated, so that shared context runs
+ * a real {@code HoldSweepService} tick every 30 seconds for as long as any of
+ * the ten classes is executing, writing into the same registry this class
+ * reads. Second, several of those siblings are deliberately not {@code
+ * @Transactional} (they race real per-thread transactions) and therefore
+ * <em>commit</em> real multi-seat holds with a five-minute TTL into the shared
+ * database. On a slow or loaded run, one of those holds can age past its TTL
+ * and be reclaimed by a background tick as a batch of two, three or more
+ * seats, in this registry, moments before a test here looks at it.
+ *
+ * <p>That is exactly why {@code #max()} is not asserted on anywhere in this
+ * class. {@code DistributionSummary#max()} is a {@code TimeWindowMax}: a
+ * rolling window (about two minutes) over everything <em>anyone</em> recorded,
+ * so {@code assertThat(summary.max()).isEqualTo(1.0)} fails the moment an
+ * unrelated sibling's batch is the largest thing in the window - a failure
+ * that says nothing about whether the recording under test is correct. {@code
+ * #totalAmount()} and {@code #count()} are strictly cumulative and monotonic,
+ * so before/after deltas around the call under test are immune to both noise
+ * sources above while still going to zero if the recording is removed.
+ *
+ * <p>Note that a separate context - {@code
+ * HoldSweepSeatLockOrderIntegrationTest}, whose annotations differ only by
+ * lacking {@code @AutoConfigureMockMvc} and whose {@code
+ * PropertyMappingContextCustomizer} therefore splits the cache key - is
+ * <em>not</em> a noise source here despite also committing expired holds: a
+ * distinct context gets a distinct registry <em>and</em> its own Postgres
+ * container ({@code PostgresTestcontainersConfig} declares the container as a
+ * plain {@code @Bean} with no Testcontainers reuse), so nothing it commits is
+ * visible to this context's scheduler or its meters.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -103,6 +154,9 @@ class HoldIntegrationTest {
 
     @Autowired
     private EntityManager entityManager;
+
+    @Autowired
+    private MeterRegistry meterRegistry;
 
     @Test
     @Transactional
@@ -360,6 +414,24 @@ class HoldIntegrationTest {
         hold.setExpiresAt(Instant.now().minusSeconds(60));
         entityManager.flush();
 
+        // T-005: read the two sweep summaries before and after, and diff.
+        // Both reads must be deltas rather than absolute values - see this
+        // class's Javadoc for the shared-registry noise source that makes any
+        // absolute assertion here unsafe. #totalAmount is specifically the
+        // safe statistic to diff: it is strictly cumulative, so it is
+        // order-insensitive and a concurrent idle background sweep (which
+        // legitimately records 0) cannot move it. #max is deliberately NOT
+        // asserted on: it is Micrometer's TimeWindowMax, a rolling window
+        // that reports the largest value recorded in roughly the last two
+        // minutes by anyone sharing this registry, so any assertion on it -
+        // absolute or delta - is a bet on what the rest of the suite happened
+        // to be doing. It would also add nothing: the totalAmount deltas
+        // below already pin the exact value this sweep recorded.
+        DistributionSummary seatsSummary = meterRegistry.get("seatvault.sweep.seats.reclaimed").summary();
+        DistributionSummary holdsSummary = meterRegistry.get("seatvault.sweep.holds.expired").summary();
+        double seatsTotalBefore = seatsSummary.totalAmount();
+        double holdsTotalBefore = holdsSummary.totalAmount();
+
         holdSweepService.sweepExpiredHolds();
         // The sweep now runs three statements on this same transaction's
         // connection (T-001/#16): a native locking id projection, then two
@@ -376,6 +448,61 @@ class HoldIntegrationTest {
 
         Hold reloadedHold = holdRepository.findById(holdId).orElseThrow();
         assertThat(reloadedHold.getStatus()).isEqualTo(HoldStatus.EXPIRED);
+
+        assertThat(seatsSummary.totalAmount() - seatsTotalBefore)
+                .as("the sweep must record the one seat it reclaimed into "
+                        + "seatvault.sweep.seats.reclaimed")
+                .isEqualTo(1.0);
+        assertThat(holdsSummary.totalAmount() - holdsTotalBefore)
+                .as("the sweep must record the one hold it expired into "
+                        + "seatvault.sweep.holds.expired")
+                .isEqualTo(1.0);
+    }
+
+    /**
+     * The other half of T-005's zero-recording decision: an idle sweep -
+     * nothing expired, nothing to do - must still record {@code 0} rather
+     * than skip the call, because {@code HoldSweepService} takes {@code
+     * expiredSeatIds.size()} on a branch where the bulk {@code UPDATE} is
+     * skipped entirely and it would be easy to skip the metric with it.
+     *
+     * <p>Asserted via {@code #count}, not {@code #totalAmount}: a recorded
+     * {@code 0} moves {@code count} but by definition never moves {@code
+     * totalAmount}, so {@code totalAmount} alone cannot distinguish "recorded
+     * a 0" from "recorded nothing at all". The {@code count} delta is
+     * asserted as "at least 1" rather than "exactly 1" so a real background
+     * tick landing in the same instant (see this class's Javadoc) cannot fail
+     * it - and that tolerance costs nothing, because a background tick goes
+     * through the same single {@code SweepMetrics#recordSweep} call site.
+     * Delete that call and no invocation on any thread can move {@code count}
+     * at all, so the delta becomes deterministically 0 and this fails.
+     */
+    @Test
+    @Transactional
+    void idleSweepRecordsZeroRatherThanSkippingTheMetric() {
+        DistributionSummary seatsSummary = meterRegistry.get("seatvault.sweep.seats.reclaimed").summary();
+        DistributionSummary holdsSummary = meterRegistry.get("seatvault.sweep.holds.expired").summary();
+        long seatsCountBefore = seatsSummary.count();
+        long holdsCountBefore = holdsSummary.count();
+        double seatsTotalBefore = seatsSummary.totalAmount();
+        double holdsTotalBefore = holdsSummary.totalAmount();
+
+        holdSweepService.sweepExpiredHolds();
+
+        assertThat(seatsSummary.count() - seatsCountBefore)
+                .as("an idle sweep must still record a value into "
+                        + "seatvault.sweep.seats.reclaimed, not skip the metric")
+                .isGreaterThanOrEqualTo(1);
+        assertThat(holdsSummary.count() - holdsCountBefore)
+                .as("an idle sweep must still record a value into "
+                        + "seatvault.sweep.holds.expired, not skip the metric")
+                .isGreaterThanOrEqualTo(1);
+        assertThat(seatsSummary.totalAmount())
+                .as("the value an idle sweep records must be 0")
+                .isEqualTo(seatsTotalBefore);
+        assertThat(holdsSummary.totalAmount())
+                .as("the value an idle sweep records must be 0")
+                .isEqualTo(holdsTotalBefore);
     }
 
     private List<EventSeat> riversideSeats() {

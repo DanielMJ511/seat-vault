@@ -21,6 +21,7 @@ public class HoldSweepService {
 
     private final EventSeatRepository eventSeatRepository;
     private final HoldRepository holdRepository;
+    private final SweepMetrics sweepMetrics;
 
     /**
      * The order of these statements is load-bearing, not stylistic, on two
@@ -46,6 +47,33 @@ public class HoldSweepService {
      * locking two seats in whatever order Postgres's plan produced them,
      * against a concurrent multi-seat {@code createHold} locking the same
      * two seats the other way.
+     *
+     * <p><b>Metrics (T-005).</b> {@link SweepMetrics#recordSweep} runs after
+     * both statements, purely in-memory against Micrometer's registry - it
+     * does not touch either table, so it cannot change what gets locked or
+     * when, and does not reorder, split, or wrap the two calls above.
+     * {@code expiredSeatIds.size()} is recorded for the reclaimed-seats
+     * count rather than {@link EventSeatRepository#releaseExpiredHeldSeats}'s
+     * own row-count return value: the two numbers describe the same set
+     * (every id in {@code expiredSeatIds} was locked by the projection, so
+     * nothing can change it before the {@code UPDATE} re-touches it), and
+     * {@code size()} is available unconditionally - including on the
+     * empty-list branch below, where the {@code UPDATE} is skipped entirely
+     * and a row-count variable would not exist. Recording {@code size()}
+     * therefore records a true {@code 0} on an idle sweep rather than
+     * silently skipping the metric on exactly the branch this design is
+     * most likely to get wrong.
+     *
+     * <p>Per ADR-0002, the sweep is UX-only reconciliation: a reader
+     * normally reconciles an expired hold lazily, on read, before the sweep
+     * ever gets to it, so the sweep should usually find little to do. That
+     * is a testable prediction, and recording every sweep - including the
+     * zeros - is what makes it testable: if these numbers show sweeps
+     * routinely reclaiming large batches rather than mostly finding
+     * nothing, either lazy expiry is not firing where expected, or there is
+     * a class of seat nobody reads. Skipping the zero recordings would
+     * silently answer a different question ("how big are the sweeps that
+     * find something"), so do not "optimise" this away.
      */
     @Scheduled(fixedDelay = 30_000)
     @Transactional
@@ -55,6 +83,7 @@ public class HoldSweepService {
         if (!expiredSeatIds.isEmpty()) {
             eventSeatRepository.releaseExpiredHeldSeats(expiredSeatIds, now);
         }
-        holdRepository.expireOverdueHolds(now);
+        int expiredHoldsCount = holdRepository.expireOverdueHolds(now);
+        sweepMetrics.recordSweep(expiredSeatIds.size(), expiredHoldsCount);
     }
 }
