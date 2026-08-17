@@ -40,7 +40,7 @@ SeatVault is an event/venue seat-reservation backend (concerts, movies, theaters
 
 ## Git Guidelines
 - Commits must be clean, semantic, and focused (e.g., `feat: add pessimistic lock on seat reservation`, `test: verify concurrent booking behavior`).
-- Run `mvn test` before pushing any commit.
+- Run `./mvnw test` before pushing any commit. Use the wrapper, not a bare `mvn` — the wrapper pins Maven 3.9.16, which is what CI runs; whatever `mvn` is on PATH may be a different version.
 
 ## Agent skills
 

@@ -13,16 +13,20 @@ Run `git diff` (or `git diff <base>...HEAD` if given a specific range) to see wh
 
 ## SeatVault-specific checklist
 
-Check the diff against these, drawn directly from this repo's `CLAUDE.md`:
+**Read `CLAUDE.md`'s "Architecture Guidelines" and "Coding Conventions" sections. That list is your checklist.**
 
-- **3-tier boundary violations**: does a Controller call a Repository directly, skipping the Service layer?
-- **Entity leakage**: does an API response (controller method return type, or a DTO that wraps one) expose a JPA `@Entity` instead of a `record` DTO?
-- **Field injection**: any `@Autowired` on a field instead of constructor injection?
-- **Transaction correctness**: does new/changed logic touching holds, seats, or bookings have an explicit `@Transactional` with a deliberate isolation level? Flag default-isolation `@Transactional` on anything concurrency-sensitive (seat locking, hold creation/expiry, booking confirmation) as a finding, not just a style note — this is the project's core correctness concern per `CLAUDE.md`.
-- **Error handling**: does the diff throw `ApiException(HttpStatus, code, message)` for error paths, or does it build an ad hoc `ResponseEntity`/exception that bypasses `GlobalExceptionHandler`?
-- **Schema drift**: any Hibernate/JPA annotation change that implies a schema change without an accompanying Flyway `V{n}__....sql` migration? (`ddl-auto=validate` means this fails loudly at runtime, not silently — but it should never reach that point.)
-- **Domain language drift**: does the diff introduce terminology that `CONTEXT.md` / `docs/agents/domain.md` explicitly avoids (e.g. "Reservation", "Ticket" where the domain language says `Hold`/`Booking`/`EventSeat`)?
+It is not restated here on purpose. `builder` applies the same one list, and a second copy in this file would let the two drift apart — see `loop/LESSONS.md` (M8). Check the diff against the rules as written there.
+
+Where to spend your attention, since not all of those rules are equal by the time a diff reaches you:
+
+- **Already enforced, so skim**: Flyway migrations (`ddl-auto=validate` fails loudly at startup) and `record` DTO return types (usually a compile error). If the diff got here green, these mostly hold.
+- **Convention only, so these are yours**: 3-tier boundaries (a Controller reaching a Repository directly), field injection (`@Autowired` on a field), `ApiException` usage (an ad hoc `ResponseEntity` or exception bypassing `GlobalExceptionHandler`), and domain-language drift (a synonym like "Reservation" or "Ticket" where `CONTEXT.md` says `Hold`/`Booking`/`EventSeat`). Nothing else in the pipeline catches these.
+- **Transaction correctness is the one to be strict about.** A default-isolation `@Transactional` on anything concurrency-sensitive — seat locking, hold creation or expiry, booking confirmation — is a **finding, not a style note**. Concurrency correctness is this project's whole reason for existing, and the isolation level is load-bearing. `builder` is required to state which level it chose and why; if that statement is missing on a concurrency-touching diff, ask for it.
+
+Also check, on every diff:
+
 - **Scope creep**: does the diff touch files or add abstractions beyond what the task packet (`loop/tasks/T-00X.md`) asked for?
+- **Convention drift `CLAUDE.md` hasn't caught up to**: if the diff follows a pattern that contradicts `CLAUDE.md`, one of the two is stale. Say which you think it is — that may be a `CLAUDE.md` fix rather than a code fix.
 
 ## Retro-earned checks
 
