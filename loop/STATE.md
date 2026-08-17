@@ -559,3 +559,8 @@ Never edit past entries; only append. Spans all milestones.
 ## 2026-08-17 — M8 implementation complete
 - All five tasks (T-001 through T-005) are done. Every verification line under issue #19 in `loop/PLAN.md` is now checked off, including "Full `mvn test` green" (129 tests, 0 failures, verified directly by the orchestrator) — the last outstanding line.
 - Remaining steps are the user's: `security-review`, `/retro`, and closing issue #19 — with the two deliberate departures from its wording called out explicitly when it is closed, not silently ticked as though the issue's literal text were satisfied. Both are recorded in `loop/PLAN.md`'s "Two deliberate departures from issue #19's wording" section and in ADR-0013/T-004: (1) the parent `/actuator/health` reports DOWN with Redis stopped while the readiness group reports UP — the verification intent (do not evict a working instance) is met by an honestly degraded aggregate, not by a literal "UP" everywhere; (2) the healthcheck is declared once, in the `Dockerfile`, with compose carrying only a pointer comment, not duplicated in both places as the issue's wording asked.
+
+## 2026-08-17 — M9 milestone boundary
+- Issue: #22
+- Tasks planned: T-001..T-002
+- ADRs written: 0014 (0013 amended)

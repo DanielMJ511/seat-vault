@@ -1,0 +1,41 @@
+# Readiness is a reachability probe, not a pool health check
+
+`/actuator/health/readiness` answers one question: **can this instance reach Postgres?** It answers it over a fresh, unpooled connection with short explicit timeouts, deliberately bypassing the application's HikariCP pool. It does not answer "is the connection pool healthy", and a saturated pool does not make an instance unready.
+
+ADR-0013 settled *which* dependencies are fatal to readiness. This settles *how promptly* that fatality is reported, and what the answer is measuring.
+
+## The problem this fixes
+
+Actuator's auto-configured `DataSourceHealthIndicator` validates the datasource by acquiring a real pooled connection. With HikariCP's default 30s `connection-timeout` unoverridden, a Postgres outage made the probe block for up to 30 seconds per call. Observed in M8/T-004: with `docker stop seatvault-postgres` and the app still running, a direct request to the readiness endpoint returned nothing at all within a 15-second client timeout.
+
+The container healthcheck was never affected — `wget --timeout=3s` bounded each probe long before the app-side 30s could elapse — so nothing was broken. The reason to fix it anyway is not the stall itself but **what the stall consumes**. The pool is small (10 by default). During an outage, real user requests are already queued on connection acquisition, and a readiness probe firing every 10 seconds adds another consumer to that queue, each holding a request thread for its full wait. On a system whose entire design claim is behaviour under contention (ADR-0001), the health check becomes a thread- and connection-exhaustion amplifier at precisely the moment the system is least able to absorb one.
+
+## Why not simply shorten Hikari's connection-timeout
+
+That was #20's literal deliverable and it is the wrong fix, because `spring.datasource.hikari.connection-timeout` is **global** — it governs real user requests, not just the probe.
+
+This application takes Postgres row locks with no lock timeout (`findByIdForUpdate`), so a thread blocked on a contended seat holds its connection for the whole wait. Under legitimate peak contention, threads waiting a while for a connection is the system working as designed, not a fault. A short global timeout converts that queueing into spurious 500s — which is exactly the false defect `application-test.properties` raises `maximum-pool-size` to 30 to avoid, and exactly what `NoOversellIntegrationTest` and `BookingConfirmLoadIntegrationTest` exist to treat as real failures.
+
+So the property that makes readiness fast is the same property that makes the system fragile under load. They cannot be tuned independently while they are the same property. Decoupling is what makes them separable.
+
+## The trade-off being accepted
+
+A separate connection path can report `UP` while the application pool is exhausted. That correlation is genuinely lost, and it is worth being explicit that it was traded away rather than overlooked.
+
+It is the right trade because **pool saturation is a load signal, not a readiness signal.** Readiness exists to tell an orchestrator whether to route traffic here, and an instance struggling under contention is one you must *not* evict: removing it sheds capacity onto its siblings and makes their contention worse. This is the same argument ADR-0013 used to keep Redis out of the readiness group — do not pull a working instance out of rotation — applied to a load condition instead of a dependency.
+
+A pool-saturation indicator on the authenticated parent aggregate was considered and deliberately not built here. It is real observability, but it answers an operator's question, not an orchestrator's, and adding it under cover of this fix would be scope decided by momentum rather than by need.
+
+## Consequences
+
+**The probe must not be a `DataSource` bean.** `DataSourceAutoConfiguration$PooledDataSourceConfiguration` carries `@ConditionalOnMissingBean({DataSource.class, XADataSource.class})`, so registering any `DataSource` bean suppresses Boot's auto-configured application datasource entirely — a silent, catastrophic takeover. `DataSourceHealthContributorAutoConfiguration` separately composes `Map<String, DataSource>`, so a second one would also be folded into a composite `db` indicator. Both verified against `spring-boot-jdbc` 4.1.0 with `javap -v` rather than assumed. The replacement seam is the bean *name*: that autoconfiguration backs off on `@ConditionalOnMissingBean(name = {"dbHealthIndicator", "dbHealthContributor"})`, so a bean named `dbHealthIndicator` substitutes cleanly and still resolves as `db` in the readiness group.
+
+**The connection is fresh every probe, and that is deliberate.** Pooling would defeat the semantics: a cached idle connection can answer `UP` at a moment when no *new* connection can be established, which is the failure mode being probed for. One TCP connect every ten seconds is not a cost worth optimising against correctness. The probe runs `SELECT 1` rather than connecting and closing, because a server that completes TCP and authentication but cannot serve queries — in recovery, or out of WAL disk — is down for our purposes, and connect-only would report it `UP`. Dropping the validation query would make this replacement strictly weaker than the Boot indicator it replaces.
+
+**Timeouts are integer seconds, which bounds how aggressive this can be.** pgjdbc's `connectTimeout`, `socketTimeout` and `loginTimeout` are all whole seconds (`Integer.parseInt`, verified in `PGProperty` bytecode), so one second is the floor. The chosen values — `connectTimeout=2`, `socketTimeout=2`, `loginTimeout=3` — put the worst case around five seconds, which is why the container healthcheck's own budget widened from 3s to 6s. Leaving it at 3s would have meant our probe silencing the prompt 503 this decision exists to produce, reproducing the original opacity at smaller scale. 6s remains well under the 10s interval, so probes still never overlap and the `healthy → unhealthy` transition timing is unchanged.
+
+Note the asymmetry that makes these values cheap: a *refused* connection fails instantly whatever they are set to. They only bite on a blackholed host where packets are dropped without an RST.
+
+**This partially supersedes ADR-0013's testability claim.** That ADR states Postgres-down cannot be tested the way Redis-down is, because the context cannot boot without a database. That was true when the health check shared the application datasource. Decoupling changes the layer: a test can now point *only* the health path at a dead port while the main datasource stays on a real container, so the context boots normally and readiness can be observed failing in-process — the same shape as `BrokenRedisTestConfig`, and the direct application of M8's retro lesson that "untestable" usually means "untestable at the layer I was thinking about."
+
+What that test proves is bounded, and any test covering it must say so: it proves the fail-fast **mechanism** on a refused connection. It does not prove the timeout *values*, because a refused connection never reaches them, and it does not prove that the health path and the application datasource point at the same database — that is a wiring property, observable only at the container layer. A blackhole test against a reserved non-routable address was rejected: whether such an address drops or refuses depends on the host routing table, the Docker bridge and the CI provider's egress, so it would be green for reasons nobody controls — trading one environment-sensitive flake for another in a milestone whose purpose is removing them.
