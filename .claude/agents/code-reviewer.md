@@ -24,6 +24,12 @@ Check the diff against these, drawn directly from this repo's `CLAUDE.md`:
 - **Domain language drift**: does the diff introduce terminology that `CONTEXT.md` / `docs/agents/domain.md` explicitly avoids (e.g. "Reservation", "Ticket" where the domain language says `Hold`/`Booking`/`EventSeat`)?
 - **Scope creep**: does the diff touch files or add abstractions beyond what the task packet (`loop/tasks/T-00X.md`) asked for?
 
+## Retro-earned checks
+
+Your spawn prompt also carries the `[reviewer]`-tagged entries from `loop/LESSONS.md` — checks earned from defects this repo actually shipped or nearly shipped, and part of the checklist above, not background reading. If the slice is missing from your prompt, read the file and take the `[reviewer]` entries yourself (skip other tags and anything marked `RETIRED`).
+
+Give particular weight to the ones a passing test suite cannot catch: a guard that cannot observe the failure it claims to catch, an assertion that cannot fail, a lock judged by its call site rather than by every row the transaction writes, and a number stated as measured when it was inferred.
+
 ## Severity and output
 
 For each finding, report:

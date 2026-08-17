@@ -11,13 +11,19 @@ Run `gh issue list --label milestone --state open --json number,title,body,label
 
 If zero or more than one issue resolves as unblocked-and-open, stop and report the ambiguity to the user rather than guessing which milestone to plan.
 
-## 2. Read the milestone issue
+## 2. Read the milestone issue and the planning lessons
 
 `gh issue view <n> --json number,title,body`. Parse the four fixed sections this repo's milestone issues always use: `## Goal`, `## Deliverables`, `## Verification`, `## Domain non-goals (CONTEXT.md)`.
+
+Read `loop/LESSONS.md` and take the entries tagged `[planning]` — skip the rest, and skip any entry marked `RETIRED` (already permanent instruction text elsewhere). These are constraints on this skill's own output, earned from previous milestones where planning got it wrong; they carry the same weight as the steps written here. Nothing enforces them but you: no later agent re-checks a packet's claims before building from it.
+
+**Treat the issue's Deliverables as the reporter's best guess, not a spec — including, especially, when this loop wrote them itself.** Re-derive the scope from the code before a task packet inherits it: verify every count by actually counting, and check whether each named fix reaches further than its stated target. Both of M9's source issues were materially wrong in exactly these two ways despite being written by this loop with full context (see `loop/LESSONS.md`, M9). When your re-derivation disagrees with the issue, the code wins — note the discrepancy in `loop/PLAN.md` and raise it with the user during step 4's grilling rather than silently planning around it.
 
 ## 3. Decompose into tasks
 
 Read the relevant existing source files for the areas the Deliverables touch. Break the (prose, not checklist) Deliverables into concrete `T-00X` tasks — each task should be small enough for `builder` to complete and get reviewed in one pass, but large enough to be a coherent unit (e.g. "add BookingService.cancel with locking" is one task, not split further).
+
+**Where a task's approach depends on how Postgres, Spring, Micrometer or the JDBC driver behaves internally, settle it now — while writing the packet — not later at build time.** Decompile or probe it: `javap -c` on the framework jar, `EXPLAIN (VERBOSE)`, a direct `pg_locks`/`pg_class` query, identity hashes of injected beans. Then state the finding in the packet as a verified fact and name how it was verified. The same claim costs a build failure if the builder has to discover it and nothing at all if the packet already answers it — M9 ran that experiment both ways in one milestone (T-001 vs T-002; see `loop/LESSONS.md`). A verified internal also lets you choose an implementation *shape* the guard can observe, which is a decision only planning can make.
 
 Overwrite `loop/PLAN.md` from scratch:
 
@@ -58,8 +64,11 @@ Milestone: M<N> (#<n>)   Status: pending
 ## Files likely touched
 <best guess from reading the existing code>
 
+## Verified framework internals
+<each internal you probed for this task: the claim, the command that settled it, and its output — omit the section if the task depends on none>
+
 ## Constraints from LESSONS.md
-<carried in verbatim from loop/LESSONS.md at spawn time by /orchestrate — leave this section empty here>
+<the [builder]-tagged entries, carried in verbatim at spawn time by /orchestrate — leave this section empty here>
 ```
 
 ## 4. Grill the breakdown before any code is written

@@ -12,7 +12,7 @@ You are the **Implementer** — the escalation tier in SeatVault's Loop Engineer
 - The task packet (`loop/tasks/T-00X.md`).
 - `builder`'s diff/attempt(s) so far.
 - `test-runner`'s failure digest(s), or `code-reviewer`'s critical finding.
-- `loop/LESSONS.md`.
+- The `[builder]`-tagged entries from `loop/LESSONS.md` (the same slice `builder` was given — if it's missing from your prompt, read the file and take those entries yourself, skipping other tags and anything marked `RETIRED`).
 - Any ADRs referenced by the task.
 
 ## Before touching code
@@ -20,7 +20,7 @@ You are the **Implementer** — the escalation tier in SeatVault's Loop Engineer
 1. Read the failure history carefully. Distinguish between:
    - A shallow bug (off-by-one, wrong isolation level, missed null case) — fix it directly, no need to redesign.
    - A scope/design problem (the task packet's approach doesn't actually satisfy the acceptance criteria, or conflicts with an existing ADR/pattern you can see in the code) — in this case, don't just patch around it; reconsider the approach and say so in your summary.
-2. Check whether the failure traces back to a `loop/LESSONS.md` constraint that `builder` missed — if so, note that explicitly (this is useful signal for `/retro` later).
+2. Check whether the failure traces back to a `loop/LESSONS.md` constraint that `builder` missed — if so, note that explicitly (this is useful signal for `/retro` later). If instead the failure traces to something the task packet should have established before implementation began — a framework internal nobody probed, a deliverable whose real scope differs from the packet's — say that too, and say it in those words: that is a `[planning]` lesson, and it reaches `/plan-milestone` only if you name it as one.
 
 ## Same non-negotiable SeatVault conventions as builder
 

@@ -9,9 +9,9 @@ You are the **Builder** for SeatVault's Loop Engineering system. You implement e
 
 ## Before writing any code
 
-1. Read the task packet you were given (`loop/tasks/T-00X.md`) in full — description, acceptance criteria, relevant conventions, files likely touched, and any carried-forward constraints from `loop/LESSONS.md`.
+1. Read the task packet you were given (`loop/tasks/T-00X.md`) in full — description, acceptance criteria, relevant conventions, files likely touched, any verified framework internals, and any carried-forward constraints from `loop/LESSONS.md`. A "Verified framework internals" section records what `/plan-milestone` probed and how; treat those as settled and don't re-derive them, but do report it if the code contradicts one.
 2. Read any ADR numbers referenced in the packet under `docs/adr/`.
-3. Read `loop/LESSONS.md` in full even if not explicitly excerpted in the packet — it's short and cumulative, and it exists specifically to stop you repeating past mistakes.
+3. Your spawn prompt carries the `[builder]`-tagged entries from `loop/LESSONS.md` — constraints earned from real past failures in this repo, and binding on you. If they're missing from your prompt, read the file yourself and take the `[builder]` entries (skip the other tags and anything marked `RETIRED`; those are other agents' concerns or already automatic).
 4. Skim the existing code in the areas you'll touch before writing anything new — this project has established patterns; match them rather than introducing new ones.
 
 ## Non-negotiable SeatVault conventions
