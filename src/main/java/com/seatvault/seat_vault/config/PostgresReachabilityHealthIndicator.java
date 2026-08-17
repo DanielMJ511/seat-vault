@@ -27,13 +27,47 @@ import org.springframework.boot.health.contributor.Health;
  * <p><b>Timeouts are pgjdbc connection properties, not Hikari's.</b> {@code
  * connectTimeout}/{@code socketTimeout}/{@code loginTimeout} are parsed by
  * pgjdbc with {@code Integer.parseInt} - whole seconds only, verified against
- * {@code PGProperty}'s bytecode, not assumed from documentation. The values
- * below put the worst case (on a blackholed, not merely refused, host) near
- * five seconds, which is why the container {@code HEALTHCHECK}'s own {@code
- * --timeout} widened from 3s to 6s alongside this change. This application's
- * own HikariCP pool ({@code spring.datasource.*}) is untouched by any of
- * this - that decoupling is the entire point (see ADR-0014's "Why not simply
- * shorten Hikari's connection-timeout").
+ * {@code PGProperty}'s bytecode, not assumed from documentation. This
+ * application's own HikariCP pool ({@code spring.datasource.*}) is untouched
+ * by any of this - that decoupling is the entire point (see ADR-0014's "Why
+ * not simply shorten Hikari's connection-timeout").
+ *
+ * <p><b>This probe has two phases, and their bounds add up: ~5s worst
+ * case.</b> Measured against a frozen server ({@code docker pause}, which
+ * completes the TCP handshake and then never answers). The login phase is
+ * bounded by {@code loginTimeout} - 3.0s, repeatable, with
+ * {@code socketTimeout} never binding there because the overall deadline
+ * always fires first. The {@code SELECT 1} that follows is a separate read
+ * bounded by {@code socketTimeout} alone - 2.0s, measured by freezing the
+ * server in a window held open after login. {@code loginTimeout} has already
+ * expired by then and does not cap it. A server that logs in slowly and then
+ * stops answering pays both. A blackholed host (packets dropped at connect)
+ * ends at {@code connectTimeout} instead: 2.1s, also measured.
+ *
+ * <p>Do not read the 3s login bound as the probe's ceiling; sizing the
+ * container {@code HEALTHCHECK} against it rather than against the 5s sum is
+ * the mistake that makes its margin look larger than it is.
+ *
+ * <p><b>Do not raise {@code loginTimeout} past 4 without re-measuring.</b>
+ * pgjdbc's default {@code sslmode=prefer} attempts SSL first and, when that
+ * attempt fails, <em>retries the whole connection in plaintext</em> - so a
+ * hung login spends {@code socketTimeout} twice. With {@code loginTimeout}
+ * disabled the same frozen server took 4.1s ({@code sslmode=disable} took
+ * 2.1s, confirming the cause). Today the 3s deadline fires before that second
+ * read can finish; raise it and this probe silently inherits the 4.1s path.
+ *
+ * <p><b>These values are coupled across files:</b> {@code loginTimeout} +
+ * {@code socketTimeout} (5s) &lt; {@code HEALTHCHECK --timeout} (6s) &lt;
+ * {@code --interval} (10s), the latter two in the {@code Dockerfile}. Nothing
+ * enforces that ordering at build time. Break it and the container
+ * healthcheck cuts the request off before this probe can return its own 503 -
+ * the exact opacity ADR-0014 exists to remove.
+ *
+ * <p><b>What these figures do not cover: DNS.</b> Hostname resolution
+ * happens before the socket is opened, and no measurement here establishes
+ * that any of these three properties bound it. In a container the URL host is
+ * a Docker DNS name, so a resolver hang is a plausible path past this budget.
+ * Untested, and recorded as untested rather than assumed either way.
  */
 class PostgresReachabilityHealthIndicator extends AbstractHealthIndicator {
 

@@ -53,13 +53,22 @@ EXPOSE 8080
 # doesn't get flagged unhealthy or thrash the container.
 #
 # timeout=6s (widened from 3s - see ADR-0014/T-002): the readiness probe's
-# own dbHealthIndicator now bounds a Postgres outage at ~5s worst case
-# (connectTimeout=2s + socketTimeout=2s + loginTimeout=3s on a blackholed
-# host - a merely refused connection fails far faster). Leaving this at 3s
-# would have this wget cut the request off before that probe could ever
-# return its own prompt 503, reproducing the original opacity at smaller
-# scale. 6s stays well under the 10s interval, so probes still never overlap
-# and the healthy -> unhealthy transition timing is unchanged.
+# own dbHealthIndicator bounds a Postgres outage at ~5s worst case. That is
+# two measured phase bounds added together, not the single figure the earlier
+# comment here implied: pgjdbc's loginTimeout (3.0s) caps the login phase, and
+# socketTimeout (2.0s) separately caps the SELECT 1 read that follows, which
+# loginTimeout has stopped governing by then. A blackholed host ends at
+# connectTimeout instead (2.1s), and a merely refused connection fails in
+# milliseconds. Leaving this at 3s would have this wget cut the request off
+# before that probe could ever return its own prompt 503, reproducing the
+# original opacity at smaller scale. 6s stays under the 10s interval, so
+# probes still never overlap and the healthy -> unhealthy transition timing is
+# unchanged - but the margin over the probe is 1s, not the 3s it looks like if
+# you size against loginTimeout alone.
+#
+# INVARIANT, enforced by nothing but this comment and the one on
+# PostgresReachabilityHealthIndicator: loginTimeout + socketTimeout (5s) <
+# --timeout (6s) < --interval (10s). Change any of them and check the others.
 HEALTHCHECK --start-period=40s --interval=10s --timeout=6s --retries=3 \
   CMD wget --spider -q http://localhost:8080/actuator/health/readiness || exit 1
 

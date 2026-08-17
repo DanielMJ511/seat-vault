@@ -41,9 +41,13 @@ import tools.jackson.databind.ObjectMapper;
  * socketTimeout}/{@code loginTimeout}. So this proves the fail-fast
  * <em>mechanism</em> and the decoupling (the context boots on a real database
  * while readiness reports {@code DOWN}); it proves <b>nothing</b> about those
- * timeout values, which only bite on a blackholed host - {@link #MAX_ELAPSED}
- * is a loose bound proving absence of a hang, not a measurement of the ~5s
- * worst case ADR-0014 budgets for. Nor does it prove the health path and the
+ * timeout values, which only bite on a host that hangs rather than refuses -
+ * {@link #MAX_ELAPSED} is a loose bound proving absence of a hang, not a
+ * measurement of the worst case ADR-0014 budgets for. Those values have since
+ * been measured out-of-band against a {@code docker pause}d server - ~5s,
+ * composed of a 3.0s login bound and a separate 2.0s query bound; see
+ * ADR-0014's Consequences - which is a separate exercise from this test and
+ * does not change what this test covers. Nor does it prove the health path and the
  * application datasource point at the same database - that is a wiring
  * property, observable only at the container layer (see M8/T-004's
  * {@code docker stop}-based verification, re-run for this change against the
@@ -61,7 +65,10 @@ class HealthReadinessPostgresDownIntegrationTest {
      * with generous headroom for a slow CI box. A refused connection on a
      * dead port fails in milliseconds, so this bound is not a measurement of
      * the {@code connectTimeout=2}/{@code socketTimeout=2}/{@code
-     * loginTimeout=3} values - see the class Javadoc.
+     * loginTimeout=3} values - see the class Javadoc. Do not read it as
+     * headroom over those values either: it happens to equal the probe's ~5s
+     * composed worst case, which is a coincidence of two unrelated choices,
+     * not an assertion about it.
      */
     private static final Duration MAX_ELAPSED = Duration.ofSeconds(5);
 

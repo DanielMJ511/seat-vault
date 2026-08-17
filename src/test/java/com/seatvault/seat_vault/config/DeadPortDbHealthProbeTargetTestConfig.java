@@ -29,11 +29,19 @@ import org.springframework.context.annotation.Bean;
  * fails instantly, regardless of {@code connectTimeout}/{@code
  * socketTimeout}/{@code loginTimeout} - so a test built on this proves the
  * fail-fast mechanism and the decoupling from the application datasource,
- * never the timeout values themselves. Those only bite on a blackholed host,
- * and a blackhole test against a reserved non-routable address was
- * deliberately rejected in ADR-0014 as an environment-sensitive flake trade
- * (whether such an address drops or refuses depends on the host routing
- * table, the Docker bridge, and the CI provider's egress).
+ * never the timeout values themselves. Those only bite on a host that hangs
+ * rather than refuses, and such a test was deliberately rejected in ADR-0014
+ * as an environment-sensitive flake trade (whether a reserved non-routable
+ * address drops or refuses depends on the host routing table, the Docker
+ * bridge, and the CI provider's egress).
+ *
+ * <p>That rejection still stands for the <em>suite</em>. The values were
+ * instead measured out-of-band against a {@code docker pause}d container -
+ * ~5s, a 3.0s login phase bounded by {@code loginTimeout} plus a 2.0s
+ * {@code SELECT 1} bounded by {@code socketTimeout} - and recorded in
+ * ADR-0014's Consequences. Deliberately not automated here: it needs a
+ * container paused mid-test and would reintroduce exactly the environment
+ * sensitivity this class avoids.
  */
 @TestConfiguration(proxyBeanMethods = false)
 public class DeadPortDbHealthProbeTargetTestConfig {
