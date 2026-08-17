@@ -564,3 +564,54 @@ Never edit past entries; only append. Spans all milestones.
 - Issue: #22
 - Tasks planned: T-001..T-002
 - ADRs written: 0014 (0013 amended)
+
+## 2026-08-17 — T-001 Gate `@EnableScheduling` under a property, not a profile
+- Agents involved: builder only (no escalation, no respins).
+- What was built: new `config/SchedulingConfig.java` carrying `@EnableScheduling` behind
+  `@ConditionalOnProperty(name = "seatvault.sweep.scheduling.enabled", matchIfMissing = true)`,
+  replacing the bare annotation on `SeatVaultApplication` (removed, with a pointer comment left in
+  its place). Property written explicitly as `=true` in `application.properties` and `=false` in
+  `src/test/resources/application-test.properties`, per the "property gate, not profile gate"
+  decision already recorded in `loop/PLAN.md`'s grilling section. New tests
+  `HoldSweepSchedulingDisabledIntegrationTest` and `HoldSweepSchedulingEnabledInDevIntegrationTest`,
+  plus a shared helper `ScheduledSweepTaskAssertions`. Javadoc corrections (citing the now-gated
+  scheduler) in `HoldIntegrationTest`, `HoldLockOrderDeadlockIntegrationTest`,
+  `HoldReleaseSeatLockRaceIntegrationTest`, `HoldSweepSeatLockOrderIntegrationTest`.
+- **Guard proved in both directions, by observation, per the milestone's verification requirement.**
+  OFF: under `test`, no registered `ScheduledTaskHolder` task targets `sweepExpiredHolds`. ON: the
+  task IS registered in a real `@SpringBootTest @ActiveProfiles("dev")` context with the property
+  absent, so it exercises the actual production default rather than a fixture value (`ApplicationContextRunner`
+  was rejected during grilling for checking the condition, not a registered task). Builder additionally
+  proved the OFF test is a real guard, not a vacuous pass, by temporarily flipping the property to
+  `true` and watching it fail (`Expecting value to be false but was true`), then reverting.
+- **A framework discovery worth banking.** Builder's first two implementations compiled but the ON
+  test failed: in this Spring version, `Task#getRunnable()` returns the target wrapped in a
+  package-private `Task$OutcomeTrackingRunnable` (new — it backs `Task#getLastExecutionOutcome()`),
+  so a direct `instanceof ScheduledMethodRunnable` check never matches. Diagnosed with `javap -c`
+  plus a debug print against the real running context, then fixed by reflectively unwrapping the
+  private `runnable` field. A direct instance of M8's standing lesson: a claim about framework
+  internals is a hypothesis until observed, and our own source cannot settle it.
+- Code review verdict: APPROVED, no critical findings. The reflective unwrap was assessed as
+  fragile-by-nature but correctly shaped — `ReflectionUtils.findField` returning `null` throws an
+  `IllegalStateException` naming what needs fixing rather than silently reporting no-match (which
+  would have been the worse failure: a guard that quietly stops observing anything), and `unwrap`
+  passes other runnable shapes through unchanged, so a future Spring that stops wrapping does not
+  break it. Flagged as something for whoever next bumps the Spring version, not a blocking finding.
+- **The `dev`-profile ON test deliberately runs a live scheduler** — the very thing T-001 disables
+  everywhere else. Accepted on isolation grounds already argued during grilling (own cache key, own
+  non-reused Postgres container, no siblings, no committed fixtures, registration-only assertion),
+  with that reasoning and its breaking conditions written into the test class's Javadoc.
+- Test result: full `./mvnw test` green — **131 tests, 0 failures, 0 errors, 0 skipped**, 73s (down
+  from ~80s despite one added container). No reflection or scheduling warnings.
+- Files touched: new `src/main/java/com/seatvault/seat_vault/config/SchedulingConfig.java`; modified
+  `src/main/java/com/seatvault/seat_vault/SeatVaultApplication.java`, `application.properties`,
+  `src/test/resources/application-test.properties`; new
+  `src/test/java/com/seatvault/seat_vault/.../HoldSweepSchedulingDisabledIntegrationTest.java`,
+  `.../HoldSweepSchedulingEnabledInDevIntegrationTest.java`, `.../ScheduledSweepTaskAssertions.java`;
+  Javadoc-only edits to `HoldIntegrationTest`, `HoldLockOrderDeadlockIntegrationTest`,
+  `HoldReleaseSeatLockRaceIntegrationTest`, `HoldSweepSeatLockOrderIntegrationTest`.
+- No supplementary ADR: grilling already decided, and `loop/PLAN.md` already records, that this
+  gate does not warrant one — cheap to reverse, unsurprising once the property is read, with the
+  rejected `@Profile("!test")` alternative already recorded in the task packet and the planning
+  commit. The `OutcomeTrackingRunnable` discovery is a fact about a dependency, not an architectural
+  decision, so it is recorded here and in the test's own comment rather than in `docs/adr/`.

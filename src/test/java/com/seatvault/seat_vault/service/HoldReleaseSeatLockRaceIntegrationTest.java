@@ -272,14 +272,22 @@ class HoldReleaseSeatLockRaceIntegrationTest {
      *
      * <p>Scoped to that thread's own backend pid, and to the table. It used to
      * be an unscoped {@code select count(*) from pg_locks where not granted},
-     * which a code review flagged: {@code HoldSweepService} runs every 30
-     * seconds, {@code @EnableScheduling} is not gated by profile, Spring's
-     * context cache keeps that scheduler alive for the whole suite, and this
-     * test deliberately creates exactly the expired-hold rows the sweep hunts
-     * for. A sweep blocked on the very seat row the enclosing transaction
-     * holds would have satisfied the unscoped poll and released the thief
-     * early - a false pass, and a contradiction of this test's claim to have
-     * no sleep-and-hope window.
+     * which a code review flagged: at the time, {@code @EnableScheduling} sat
+     * directly on {@code SeatVaultApplication} with no profile gate, so {@code
+     * HoldSweepService}'s 30-second job was live in every shared Spring
+     * context - including this suite's - for as long as the JVM lived, and
+     * this test deliberately creates exactly the expired-hold rows the sweep
+     * hunts for. A sweep blocked on the very seat row the enclosing
+     * transaction holds would have satisfied the unscoped poll and released
+     * the thief early - a false pass, and a contradiction of this test's
+     * claim to have no sleep-and-hope window. T-001 has since gated that
+     * timer off under the {@code test} profile ({@code
+     * seatvault.sweep.scheduling.enabled=false}, see {@code
+     * config/SchedulingConfig.java}), so a live, asynchronously-firing sweep
+     * is no longer a possible source for this poll at all - the PID/table
+     * scoping is kept anyway because it is good, cheap practice regardless of
+     * whether a scheduler is live: an unscoped poll is a latent hazard against
+     * any future concurrent lock holder in this database, not only a sweep.
      *
      * <p>The join looks indirect because of how Postgres represents a row-lock
      * wait: the ungranted entry is a {@code ShareLock} on the holder's {@code

@@ -315,10 +315,15 @@ class HoldSweepSeatLockOrderIntegrationTest {
     /**
      * Waits until the given backend is genuinely parked on a row lock in the
      * given table. Scoped by PID and by relation for the same reason {@link
-     * HoldLockOrderDeadlockIntegrationTest#awaitBlockedOnRowLockIn} is: this
-     * runs in a shared Spring context in which {@code HoldSweepService}'s own
-     * 30-second job is live, so an unscoped poll could be satisfied by that
-     * background sweep rather than the one this test is driving.
+     * HoldLockOrderDeadlockIntegrationTest#awaitBlockedOnRowLockIn} is: an
+     * unscoped poll could be satisfied by any other lock holder in this
+     * database rather than the one this test is driving - this class's own
+     * {@code sweepExpiredHolds()} call being the most immediate example, since
+     * it locks {@code event_seats} rows directly under test here. (Historical
+     * note: before T-001 gated it off under the {@code test} profile, {@code
+     * HoldSweepService}'s own 30-second job was also live in this shared
+     * Spring context and was the original reason this scoping was added; see
+     * {@code config/SchedulingConfig.java}.)
      */
     private void awaitBlockedOnRowLockIn(AtomicLong pid, String relation, String who, AtomicBoolean finishedEarly) {
         Instant deadline = Instant.now().plus(BLOCK_TIMEOUT);

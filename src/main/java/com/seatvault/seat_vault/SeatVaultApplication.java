@@ -4,10 +4,11 @@ import com.seatvault.seat_vault.config.HoldProperties;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.scheduling.annotation.EnableScheduling;
 
+// Scheduling (@EnableScheduling) lives on com.seatvault.seat_vault.config.SchedulingConfig,
+// gated by seatvault.sweep.scheduling.enabled - see that class's Javadoc for why it is not
+// here unconditionally.
 @SpringBootApplication
-@EnableScheduling
 @EnableConfigurationProperties(HoldProperties.class)
 public class SeatVaultApplication {
 

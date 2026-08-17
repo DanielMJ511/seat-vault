@@ -80,26 +80,34 @@ import tools.jackson.databind.ObjectMapper;
  * ApplicationContext} and {@code MeterRegistry} alongside the live JDBC URL
  * during a full suite run: identical for all of them.
  *
- * <p>Two consequences. First, {@code @EnableScheduling} sits on {@code
- * SeatVaultApplication} and is not profile-gated, so that shared context runs
- * a real {@code HoldSweepService} tick every 30 seconds for as long as any of
- * the ten classes is executing, writing into the same registry this class
- * reads. Second, several of those siblings are deliberately not {@code
- * @Transactional} (they race real per-thread transactions) and therefore
- * <em>commit</em> real multi-seat holds with a five-minute TTL into the shared
- * database. On a slow or loaded run, one of those holds can age past its TTL
- * and be reclaimed by a background tick as a batch of two, three or more
- * seats, in this registry, moments before a test here looks at it.
+ * <p>The consequence: {@code HoldSweepService}'s two sweep metrics in this
+ * registry are not private to this class's two direct {@code
+ * sweepExpiredHolds()} calls (see below) even though, under the {@code test}
+ * profile, {@code seatvault.sweep.scheduling.enabled=false} (T-001, {@code
+ * config/SchedulingConfig.java}) means no live 30-second timer runs anywhere
+ * in this shared context - a stale earlier version of this comment cited that
+ * timer directly as the reason for diffing, which is no longer true and would
+ * mislead a reader into thinking this test tolerates a hazard that no longer
+ * exists. The real, current reason is JUnit gives no ordering guarantee
+ * between this class's own {@code sweepReclaimsAnExpiredHeldSeatAndExpiresItsHold}
+ * and {@code idleSweepRecordsZeroRatherThanSkippingTheMetric}: both call
+ * {@code holdSweepService.sweepExpiredHolds()} directly against this one
+ * shared {@code MeterRegistry}, so whichever runs first has already advanced
+ * both summaries before the other one's assertion reads them. Any future
+ * direct caller of {@code sweepExpiredHolds()} sharing this context adds to
+ * the same risk, which is why the registry-sharing property above is worth
+ * keeping documented even though nothing external writes into it today.
  *
  * <p>That is exactly why {@code #max()} is not asserted on anywhere in this
  * class. {@code DistributionSummary#max()} is a {@code TimeWindowMax}: a
  * rolling window (about two minutes) over everything <em>anyone</em> recorded,
- * so {@code assertThat(summary.max()).isEqualTo(1.0)} fails the moment an
- * unrelated sibling's batch is the largest thing in the window - a failure
- * that says nothing about whether the recording under test is correct. {@code
+ * so {@code assertThat(summary.max()).isEqualTo(1.0)} fails the moment
+ * anything else sharing this registry - including this class's own other
+ * direct-call test - is the largest thing in the window - a failure that says
+ * nothing about whether the recording under test is correct. {@code
  * #totalAmount()} and {@code #count()} are strictly cumulative and monotonic,
- * so before/after deltas around the call under test are immune to both noise
- * sources above while still going to zero if the recording is removed.
+ * so before/after deltas around the call under test are immune to that noise
+ * while still going to zero if the recording is removed.
  *
  * <p>Note that a separate context - {@code
  * HoldSweepSeatLockOrderIntegrationTest}, whose annotations differ only by
@@ -108,8 +116,9 @@ import tools.jackson.databind.ObjectMapper;
  * <em>not</em> a noise source here despite also committing expired holds: a
  * distinct context gets a distinct registry <em>and</em> its own Postgres
  * container ({@code PostgresTestcontainersConfig} declares the container as a
- * plain {@code @Bean} with no Testcontainers reuse), so nothing it commits is
- * visible to this context's scheduler or its meters.
+ * plain {@code @Bean} with no Testcontainers reuse), so nothing that context's
+ * own direct {@code sweepExpiredHolds()} call commits or records is visible to
+ * this context's meters.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -419,8 +428,9 @@ class HoldIntegrationTest {
         // class's Javadoc for the shared-registry noise source that makes any
         // absolute assertion here unsafe. #totalAmount is specifically the
         // safe statistic to diff: it is strictly cumulative, so it is
-        // order-insensitive and a concurrent idle background sweep (which
-        // legitimately records 0) cannot move it. #max is deliberately NOT
+        // order-insensitive and this class's other direct-call test running
+        // before or after this one (which legitimately records 0) cannot
+        // move it. #max is deliberately NOT
         // asserted on: it is Micrometer's TimeWindowMax, a rolling window
         // that reports the largest value recorded in roughly the last two
         // minutes by anyone sharing this registry, so any assertion on it -
@@ -470,12 +480,13 @@ class HoldIntegrationTest {
      * {@code 0} moves {@code count} but by definition never moves {@code
      * totalAmount}, so {@code totalAmount} alone cannot distinguish "recorded
      * a 0" from "recorded nothing at all". The {@code count} delta is
-     * asserted as "at least 1" rather than "exactly 1" so a real background
-     * tick landing in the same instant (see this class's Javadoc) cannot fail
-     * it - and that tolerance costs nothing, because a background tick goes
-     * through the same single {@code SweepMetrics#recordSweep} call site.
-     * Delete that call and no invocation on any thread can move {@code count}
-     * at all, so the delta becomes deterministically 0 and this fails.
+     * asserted as "at least 1" rather than "exactly 1" so this class's other
+     * direct-call test recording into the same registry around the same time
+     * (see this class's Javadoc) cannot fail it - and that tolerance costs
+     * nothing, because every call goes through the same single {@code
+     * SweepMetrics#recordSweep} call site. Delete that call and no invocation
+     * on any thread can move {@code count} at all, so the delta becomes
+     * deterministically 0 and this fails.
      */
     @Test
     @Transactional

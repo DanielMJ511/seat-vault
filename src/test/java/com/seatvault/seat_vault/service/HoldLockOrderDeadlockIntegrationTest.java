@@ -82,9 +82,16 @@ import org.springframework.transaction.support.TransactionTemplate;
  *
  * Every step waits for an observable lock state rather than sleeping, and each
  * wait is scoped to the exact backend PID of the thread it is waiting for (see
- * {@link #awaitBlockedOnRowLockIn}), so nothing else running in the shared
- * Spring context - {@code HoldSweepService}'s 30-second job in particular -
- * can satisfy a wait on the wrong session's behalf.
+ * {@link #awaitBlockedOnRowLockIn}), so nothing else that could hold a lock in
+ * this database can satisfy a wait on the wrong session's behalf. This
+ * scoping predates T-001: at the time it was written, {@code
+ * HoldSweepService}'s 30-second job was live in every shared Spring context
+ * with no profile gate, and was the concrete asynchronous source this guarded
+ * against. T-001 has since gated that timer off under the {@code test}
+ * profile ({@code seatvault.sweep.scheduling.enabled=false}, see {@code
+ * config/SchedulingConfig.java}), so no live sweep runs during this suite -
+ * the PID scoping is kept regardless, since it is good, cheap practice
+ * against any concurrent lock holder in this database, not only a sweep.
  *
  * <p><b>What it asserts.</b> Not "something completed": that both threads
  * finish with either success or a deliberate {@link ApiException}, and
