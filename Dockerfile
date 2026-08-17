@@ -51,7 +51,16 @@ EXPOSE 8080
 # docker-compose.yml (interval/timeout/retries: 5s/5s/5) budget for; failures
 # during the start period don't count against retries, so a normal boot
 # doesn't get flagged unhealthy or thrash the container.
-HEALTHCHECK --start-period=40s --interval=10s --timeout=3s --retries=3 \
+#
+# timeout=6s (widened from 3s - see ADR-0014/T-002): the readiness probe's
+# own dbHealthIndicator now bounds a Postgres outage at ~5s worst case
+# (connectTimeout=2s + socketTimeout=2s + loginTimeout=3s on a blackholed
+# host - a merely refused connection fails far faster). Leaving this at 3s
+# would have this wget cut the request off before that probe could ever
+# return its own prompt 503, reproducing the original opacity at smaller
+# scale. 6s stays well under the 10s interval, so probes still never overlap
+# and the healthy -> unhealthy transition timing is unchanged.
+HEALTHCHECK --start-period=40s --interval=10s --timeout=6s --retries=3 \
   CMD wget --spider -q http://localhost:8080/actuator/health/readiness || exit 1
 
 # Every setting this image needs is already environment-driven in

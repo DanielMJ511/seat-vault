@@ -615,3 +615,75 @@ Never edit past entries; only append. Spans all milestones.
   rejected `@Profile("!test")` alternative already recorded in the task packet and the planning
   commit. The `OutcomeTrackingRunnable` discovery is a fact about a dependency, not an architectural
   decision, so it is recorded here and in the test's own comment rather than in `docs/adr/`.
+
+## 2026-08-17 — T-002 Decoupled fail-fast readiness for a Postgres outage (implements ADR-0014)
+- Agents involved: builder only (no escalation, no respins).
+- What was built: Boot's auto-configured pooled `db` health indicator replaced by a custom bean
+  named `dbHealthIndicator` (`PostgresReachabilityHealthIndicator`) that opens a fresh, unpooled
+  `DriverManager` connection per probe (`connectTimeout=2`, `socketTimeout=2`, `loginTimeout=3`) and
+  runs `SELECT 1`, per the "readiness = reachability, never a `DataSource` bean" decision already
+  recorded in `loop/PLAN.md`'s grilling section and in ADR-0014. `DbHealthIndicatorConfig` resolves
+  its target via `ObjectProvider<DbHealthProbeTarget>.getIfAvailable(() -> DbHealthProbeTarget.from(connectionDetails))`
+  rather than a `@ConditionalOnMissingBean`-guarded default bean — a deliberate choice, since
+  `ObjectProvider` resolves lazily against the fully-registered bean-definition set and so is immune
+  to configuration-class processing order between the main `@Configuration` and a test's
+  `@TestConfiguration`. `DbHealthProbeTarget` is a record and is the test seam. `Dockerfile`
+  healthcheck widened 3s to 6s (per ADR-0014's already-recorded timeout composition), so the
+  container's own probe budget stays wider than the health indicator's worst case rather than
+  silencing the 503 this task exists to produce. `application.properties` gained a comment only.
+  New test config `DeadPortDbHealthProbeTargetTestConfig` and integration test
+  `HealthReadinessPostgresDownIntegrationTest`.
+- **Container-level verification, by direct observation, not by reading config.** With
+  `docker stop seatvault-postgres`, `curl /actuator/health/readiness` returned **503 in 15.6ms**
+  with body `{"components":{"db":{"status":"DOWN"},"readinessState":{"status":"UP"}},"status":"DOWN"}`
+  — against the original #20 report of nothing at all within a 15-second client timeout. Container
+  went `unhealthy` at ~29s (M8/T-004 saw ~35s at the old 3s timeout) and recovered at ~14s
+  (previously ~12s). This same observation also confirmed the custom indicator lands in the
+  readiness group as `db` — the M8/T-003 synthetic-probe-group trap.
+- **Anonymous-caller leak check passed.** `withException` stores `error = class + ": " + message` in
+  `details`, but the pre-existing, unmodified `show-details=when-authorized` gates whether details
+  ever reach a client. The new indicator joins the same filtered pipeline every other indicator
+  already uses; it opens no new leak path, and no credentials are ever placed in `Health` details or
+  logs.
+- **A residual gap, recorded honestly rather than closed.** The timeout values ship with no
+  observational proof that they bound anything: `docker stop` produces a *refused* connection, which
+  fails instantly regardless of any timeout setting, so neither the in-process test nor the
+  container check exercises them. A blackhole test was deliberately rejected during grilling as
+  environment-sensitive, and `docker pause` was not attempted here. The gap is stated independently
+  in four places — the indicator's Javadoc, ADR-0014, the dead-port test config's Javadoc, and the
+  integration test's class Javadoc.
+- Code review verdict: **APPROVED, no critical findings.** Two things were verified against
+  decompiled bytecode rather than taken on trust: that `AbstractHealthIndicator.health()` catches
+  `Exception` and routes to `Health.Builder.down(exception)` (so letting `SQLException` propagate is
+  correct, and the try-with-resources leaks no connection), and that nothing in the diff registers a
+  `DataSource`-typed bean — the silent-takeover failure mode ADR-0014's Consequences section exists
+  to avoid.
+- **ADR-0014 amended by docs-writer, not respun.** Its Consequences section stated the ~5s worst
+  case as though settled; it is an unverified estimate of how `connectTimeout`/`socketTimeout`/
+  `loginTimeout` compose, which the `javap` verification only proved are integer-second-parsed, not
+  how they interact. Amendment marks the figure as an estimate and names the two open sub-questions
+  (whether `socketTimeout` overlaps with or is independent of the login-phase reads, and whether
+  multiple resolved addresses would each get a fresh `connectTimeout` budget), pointing at
+  `docker pause`-based verification as the way to settle it later.
+- Test result: full `./mvnw test` green — **132 tests, 0 failures, 0 errors, 0 skipped**, 86s wall
+  clock across 8 Postgres container starts. Baseline at commit `f413b89` was 131; this task adds
+  exactly 1. `NoOversellIntegrationTest`, `BookingConfirmLoadIntegrationTest`, and
+  `HealthReadinessRedisDownIntegrationTest` all pass — the concurrency suites were the specific
+  spurious-500 regression risk named in `loop/PLAN.md`'s Verification section, and did not fire.
+- Files touched: new `src/main/java/com/seatvault/seat_vault/config/DbHealthProbeTarget.java`,
+  `.../config/PostgresReachabilityHealthIndicator.java`, `.../config/DbHealthIndicatorConfig.java`;
+  new `src/test/java/com/seatvault/seat_vault/config/DeadPortDbHealthProbeTargetTestConfig.java`,
+  `.../controller/HealthReadinessPostgresDownIntegrationTest.java`; modified `Dockerfile`,
+  `src/main/resources/application.properties`.
+- No supplementary ADR: ADR-0014 was already written during M9's grilling pass and covers this
+  task's decision in full; only a precision amendment to its Consequences section was needed (see
+  above), not a new ADR.
+
+## 2026-08-17 — M9 milestone (issue #22) implementation complete
+- Both tasks (T-001, T-002) done. All of M9's Verification lines in `loop/PLAN.md` are now checked:
+  full suite green at 132 tests (>= the required 129), T-001's scheduler gate proved in both
+  directions by observation, the three sweep-calling tests still pass, readiness returns a prompt
+  503 (15.6ms, well under 15s) with Postgres unreachable, no spurious failures in
+  `NoOversellIntegrationTest`/`BookingConfirmLoadIntegrationTest`, and the container still
+  transitions `healthy → unhealthy` and recovers on a Postgres outage.
+- Remaining steps are the user's: `security-review`, `/retro`, and closing issue #22.
